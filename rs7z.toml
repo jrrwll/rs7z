@@ -1,0 +1,4 @@
+# RS7Z_CONFIG=rs7z.toml
+
+custom_terminal = "iTerm2"
+# verbose = true

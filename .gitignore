@@ -1,0 +1,14 @@
+# ENV
+.idea
+.DS_Store
+# cargo
+/target
+Cargo.lock
+rustc-ice*.txt
+# cmake
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake-build-debug/
+cmake_install.cmake
+.codegraph

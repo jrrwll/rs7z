@@ -1,0 +1,37 @@
+# Run on macOS or Linux from the repository root: cargo packager
+# Keep version in sync with [package].version in Cargo.toml.
+name = "rs7z"
+productName = "rs7z"
+version = "0.1.0"
+identifier = "com.zyb.rs7z"
+description = "A desktop archive manager built with Rust and GPUI Kit."
+category = "Utility"
+# Unsupported formats are skipped: DMG on macOS, AppImage on Linux.
+# On macOS, use --formats app,dmg to also retain the standalone .app bundle.
+formats = ["dmg", "appimage"]
+icons = ["assets/rs7z.icns", "assets/icons/*.png"]
+outDir = "target/packages"
+binariesDir = "target/release"
+
+# Build natively. The deployment target matches the macOS bundle minimum and
+# has no effect when compiling on Linux.
+beforePackagingCommand = "env MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --release --locked --bin rs7z"
+
+[[binaries]]
+path = "rs7z"
+main = true
+
+[macos]
+minimumSystemVersion = "11.0"
+# For public distribution, set your Developer ID Application identity here
+# and supply notarization credentials through cargo-packager's APPLE_* env vars.
+# signingIdentity = "Developer ID Application: Your Name (TEAMID)"
+
+[dmg]
+windowSize = { width = 600, height = 400 }
+appPosition = { x = 180, y = 170 }
+appFolderPosition = { x = 420, y = 170 }
+
+# linuxdeploy bundles linked libraries; archive tools are installed separately.
+[linux]
+generateDesktopEntry = true

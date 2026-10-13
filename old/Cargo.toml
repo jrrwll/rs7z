@@ -1,0 +1,27 @@
+[package]
+name = "rs7z"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gpui = "0.2.2"
+gpui-component = "0.5.1"
+gpui-macros = "0.2.2"
+dirs = "6"
+# base
+anyhow = "1.0.102"
+thiserror = "2.0.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# compress
+zip = "8.4.0"
+tar = "0.4.45"
+bzip2 = "0.6.1"
+xz2 = "0.1.7"
+flate2 = "1.1.9"
+zstd = "0.13.3"
+brotli = "8.0.2"
+sevenz-rust2 = { version = "0.20.2", features = ["default", "brotli", "zstd", "lz4", "deflate"] }
+unrar = "0.5.8"
+chrono = "0.4.44"
+rfd = "0.15"
