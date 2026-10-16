@@ -15,6 +15,6 @@ rust-i18n = "4.2.4"
 
 [dev-dependencies]
 # Independent ZIP fixtures and assertions; never linked into the application.
-zip = { version = "6.0.0", default-features = false, features = ["deflate", "aes-crypto"] }
+zip = { version = "9", default-features = false, features = ["deflate", "aes-crypto"] }
 crc32fast = "1"
 gpui-kit = { version = "0.7.0", features = ["test-support"] }

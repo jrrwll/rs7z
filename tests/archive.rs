@@ -301,7 +301,10 @@ fn password_verification_authenticates_all_encrypted_entries_without_extracting(
     let original = fs::read(&path).unwrap();
     let mut archive = ZipArchive::new(File::open(&path).unwrap()).unwrap();
     let entry = archive.by_index_raw(0).unwrap();
-    let tag_end = (entry.data_start() + entry.compressed_size() - 1) as usize;
+    let data_start = entry
+        .data_start()
+        .expect("written entry has a known data start");
+    let tag_end = (data_start + entry.compressed_size() - 1) as usize;
     drop(entry);
     drop(archive);
     let mut damaged = original;
@@ -816,7 +819,7 @@ fn raw_entry(path: &Path, name: &str) -> (bool, zip::CompressionMethod, Vec<u8>)
     let mut archive = ZipArchive::new(File::open(path).unwrap()).unwrap();
     for ix in 0..archive.len() {
         let mut entry = archive.by_index_raw(ix).unwrap();
-        if entry.name() == name {
+        if entry.name().unwrap().as_ref() == name {
             let mut bytes = Vec::new();
             entry.read_to_end(&mut bytes).unwrap();
             return (entry.encrypted(), entry.compression(), bytes);
@@ -917,7 +920,11 @@ fn selected_export_ignores_unselected_corruption_but_password_test_checks_every_
     writer.write_all(b"damaged contents").unwrap();
     writer.finish().unwrap();
     let mut reader = ZipArchive::new(File::open(&path).unwrap()).unwrap();
-    let start = reader.by_name("bad.txt").unwrap().data_start() as usize;
+    let start = reader
+        .by_name("bad.txt")
+        .unwrap()
+        .data_start()
+        .expect("written entry has a known data start") as usize;
     drop(reader);
     let mut bytes = fs::read(&path).unwrap();
     bytes[start] ^= 1;

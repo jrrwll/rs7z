@@ -246,7 +246,11 @@ fn encrypted_zip_probe_reads_metadata_without_extracting_payloads() {
         // Damage encrypted data while leaving the directory metadata intact.
         // The missing-password result must not depend on reading that payload.
         let mut zip = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
-        let start = zip.by_index_raw(0).unwrap().data_start() as usize;
+        let start = zip
+            .by_index_raw(0)
+            .unwrap()
+            .data_start()
+            .expect("written entry has a known data start") as usize;
         drop(zip);
         let mut bytes = fs::read(&archive).unwrap();
         bytes[start] ^= 0xff;
@@ -384,7 +388,11 @@ fn extract_removes_corrupt_files_and_preserves_successful_entries_and_cancellati
         zip.write_all(b"original data").unwrap();
         zip.finish().unwrap();
         let mut zip = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
-        let start = zip.by_name("nested/损坏 file.txt").unwrap().data_start() as usize;
+        let start = zip
+            .by_name("nested/损坏 file.txt")
+            .unwrap()
+            .data_start()
+            .expect("written entry has a known data start") as usize;
         drop(zip);
         let mut bytes = fs::read(&archive).unwrap();
         bytes[start] ^= 0xff;
