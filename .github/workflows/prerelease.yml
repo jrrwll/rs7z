@@ -1,0 +1,208 @@
+name: Build pre-release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      tag: ${{ steps.metadata.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read release version
+        id: metadata
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"]
+          tag = f"v{version}-pre.{os.environ['GITHUB_RUN_NUMBER']}"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"version={version}\ntag={tag}\n")
+          PY
+
+  build:
+    name: Build ${{ matrix.platform }} ${{ matrix.arch }}
+    needs: metadata
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            runner: macos-15
+            arch: aarch64
+            packager_arch: aarch64
+            extension: dmg
+            machine: arm64
+          - platform: macos
+            runner: macos-15-intel
+            arch: x64
+            packager_arch: x64
+            extension: dmg
+            machine: x86_64
+          - platform: linux
+            runner: ubuntu-24.04
+            arch: amd64
+            packager_arch: x86_64
+            extension: AppImage
+            machine: x86_64
+          - platform: linux
+            runner: ubuntu-24.04-arm
+            arch: aarch64
+            packager_arch: aarch64
+            extension: AppImage
+            machine: aarch64
+    env:
+      CI: "true"
+      VERSION: ${{ needs.metadata.outputs.version }}
+      ASSET_ARCH: ${{ matrix.arch }}
+      PACKAGER_ARCH: ${{ matrix.packager_arch }}
+      EXTENSION: ${{ matrix.extension }}
+      EXPECTED_MACHINE: ${{ matrix.machine }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify native architecture
+        shell: bash
+        run: test "$(uname -m)" = "$EXPECTED_MACHINE"
+
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake pkg-config libclang-dev \
+            libfontconfig1-dev libfreetype6-dev libssl-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libvulkan-dev libdbus-1-dev libudev-dev \
+            file patchelf desktop-file-utils squashfs-tools libfuse2t64
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: prerelease-${{ matrix.platform }}-${{ matrix.arch }}
+
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --version 0.11.8 --locked
+
+      - name: Set package version from Cargo.toml
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          assert tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"] == version
+          config = Path("packager.toml")
+          contents, count = re.subn(
+              r'^version\s*=\s*"[^"]*"\s*$',
+              lambda _: f'version = "{version}"',
+              config.read_text(),
+              count=1,
+              flags=re.MULTILINE,
+          )
+          assert count == 1, "Expected one version field in packager.toml"
+          config.write_text(contents)
+          assert tomllib.loads(contents)["version"] == version
+          PY
+
+      - name: Package application
+        env:
+          # Run AppImage build helpers without requiring a FUSE mount in CI.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: cargo packager
+
+      - name: Collect release asset
+        shell: bash
+        run: |
+          source="target/packages/rs7z_${VERSION}_${PACKAGER_ARCH}.${EXTENSION}"
+          asset="rs7z_${VERSION}_${ASSET_ARCH}.${EXTENSION}"
+          test -f "$source"
+          mkdir -p dist
+          cp "$source" "dist/$asset"
+
+      - name: Verify DMG
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: hdiutil verify "dist/rs7z_${VERSION}_${ASSET_ARCH}.dmg"
+
+      - name: Generate and verify AppImage checksum
+        if: matrix.platform == 'linux'
+        shell: bash
+        working-directory: dist
+        run: |
+          asset="rs7z_${VERSION}_${ASSET_ARCH}.AppImage"
+          chmod +x "$asset"
+          sha256sum "$asset" > "$asset.sha256"
+          sha256sum --check "$asset.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prerelease-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  release:
+    name: Publish pre-release
+    needs: [metadata, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.metadata.outputs.version }}
+      TAG: ${{ needs.metadata.outputs.tag }}
+      COMMIT_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: prerelease-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify all six release assets
+        shell: bash
+        working-directory: dist
+        run: |
+          test -f "rs7z_${VERSION}_aarch64.dmg"
+          test -f "rs7z_${VERSION}_x64.dmg"
+          test -f "rs7z_${VERSION}_amd64.AppImage"
+          test -f "rs7z_${VERSION}_amd64.AppImage.sha256"
+          test -f "rs7z_${VERSION}_aarch64.AppImage"
+          test -f "rs7z_${VERSION}_aarch64.AppImage.sha256"
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 6
+          sha256sum --check "rs7z_${VERSION}_amd64.AppImage.sha256"
+          sha256sum --check "rs7z_${VERSION}_aarch64.AppImage.sha256"
+
+      - name: Publish release assets
+        shell: bash
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            # Re-running this workflow updates this run's assets.
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --target "$COMMIT_SHA" \
+              --title "rs7z ${VERSION} pre-release #${GITHUB_RUN_NUMBER}" \
+              --prerelease --latest=false --generate-notes
+          fi
