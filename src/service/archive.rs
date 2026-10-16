@@ -24,13 +24,13 @@ pub const ZIP_EXTENSIONS: &[&str] = &[
 
 pub const OPEN_EXTENSIONS: &[&str] = &[
     "zip", "z01", "zipx", "jar", "xpi", "odt", "ods", "docx", "xlsx", "epub", "ipa", "apk", "appx",
-    "7z", "001", "gz", "tgz", "bz2", "tbz", "tbz2", "xz", "txz", "lzma", "tlz", "zst", "tzst", "z",
-    "Z", "taz", "rar", "gzip", "bzip2", "zstd",
+    "7z", "001", "tar", "gz", "tgz", "bz2", "tbz", "tbz2", "xz", "txz", "lzma", "tlz", "zst",
+    "tzst", "z", "Z", "taz", "rar", "gzip", "bzip2", "zstd",
 ];
 
 pub const SAVE_EXTENSIONS: &[&str] = &[
     "zip", "zipx", "jar", "xpi", "odt", "ods", "docx", "xlsx", "epub", "ipa", "apk", "appx", "7z",
-    "gz", "tgz", "bz2", "tbz", "tbz2", "xz", "txz", "lzma", "tlz", "zst", "tzst",
+    "tar", "gz", "tgz", "bz2", "tbz", "tbz2", "xz", "txz", "lzma", "tlz", "zst", "tzst",
 ];
 
 pub fn is_extract_only(path: &Path) -> bool {
@@ -148,7 +148,8 @@ fn backend(path: &Path) -> Result<&'static dyn ArchiveBackend, String> {
         Some(ArchiveFormat::Stream(_)) => Err(extract_only_message(path)),
         Some(ArchiveFormat::SevenZip) => Ok(&seven_zip::SevenZipBackend),
         Some(
-            ArchiveFormat::TarGzip
+            ArchiveFormat::Tar
+            | ArchiveFormat::TarGzip
             | ArchiveFormat::TarBzip2
             | ArchiveFormat::TarXz
             | ArchiveFormat::TarLzma
@@ -162,7 +163,8 @@ fn backend(path: &Path) -> Result<&'static dyn ArchiveBackend, String> {
 pub fn is_tar(format: ArchiveFormat) -> bool {
     matches!(
         format,
-        ArchiveFormat::TarGzip
+        ArchiveFormat::Tar
+            | ArchiveFormat::TarGzip
             | ArchiveFormat::TarBzip2
             | ArchiveFormat::TarXz
             | ArchiveFormat::TarLzma
@@ -190,6 +192,7 @@ pub fn extension(format: ArchiveFormat) -> &'static str {
     match format {
         ArchiveFormat::Zip => "zip",
         ArchiveFormat::SevenZip => "7z",
+        ArchiveFormat::Tar => "tar",
         ArchiveFormat::TarGzip => "tar.gz",
         ArchiveFormat::TarBzip2 => "tar.bz2",
         ArchiveFormat::TarXz => "tar.xz",
@@ -223,6 +226,7 @@ pub fn extraction_directory(path: &Path) -> PathBuf {
         ".tlz",
         ".tzst",
         ".taz",
+        ".tar",
         ".zipx",
         ".zip",
         ".z01",
@@ -273,6 +277,8 @@ pub fn format(path: &Path) -> Option<ArchiveFormat> {
         Some(ArchiveFormat::Zip)
     } else if name.ends_with(".7z") || name.ends_with(".7z.001") {
         Some(ArchiveFormat::SevenZip)
+    } else if name.ends_with(".tar") {
+        Some(ArchiveFormat::Tar)
     } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
         Some(ArchiveFormat::TarGzip)
     } else if [".tar.bz2", ".tbz", ".tbz2"]
@@ -325,6 +331,7 @@ pub fn format_name(path: &Path) -> &'static str {
         Some(ArchiveFormat::Rar) => "RAR archive",
         Some(ArchiveFormat::SevenZip) if is_split(path) => "Split 7z archive",
         Some(ArchiveFormat::SevenZip) => "7z archive",
+        Some(ArchiveFormat::Tar) => "TAR archive",
         Some(ArchiveFormat::TarGzip) => "TAR / gzip archive",
         Some(ArchiveFormat::TarBzip2) => "TAR / bzip2 archive",
         Some(ArchiveFormat::TarXz) => "TAR / xz archive",
@@ -554,6 +561,9 @@ pub fn children(index: &ArchiveIndex, directory: &str) -> Result<Vec<FileItem>, 
                 },
                 size: entry.size,
                 modified: entry.modified,
+                created: entry.created,
+                accessed: entry.accessed,
+                archive: Some(entry.metadata.clone()),
             })
         })
         .collect();
@@ -589,6 +599,9 @@ pub(super) fn build_index(
                 directory: true,
                 size: 0,
                 modified: None,
+                created: None,
+                accessed: None,
+                metadata: Default::default(),
             });
             parent = name;
         }

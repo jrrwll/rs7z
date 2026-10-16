@@ -6,6 +6,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use rs7z::i18n::tr;
 use rs7z::{
     model::{
         archive::{ArchiveIndex, ArchiveOperation},
@@ -107,7 +108,7 @@ impl Render for RenameDialog {
                     .text_color(cx.theme().muted_foreground)
                     .child(self.item.name.clone()),
             )
-            .child(div().text_sm().child("New name"))
+            .child(div().text_sm().child(tr("New name")))
             .child(Input::new(&self.name).id("rename-name").small())
             .when_some(self.error.clone(), |body, error| {
                 body.child(div().text_sm().text_color(cx.theme().danger).child(error))

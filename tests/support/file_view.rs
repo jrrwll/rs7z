@@ -1,7 +1,7 @@
 use super::Browser;
 use gpui_kit::Entity;
 use gpui_kit::component::{Root, WindowExt as _};
-use gpui_kit::test::TestWindowExt as _;
+use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{
     App, AppContext as _, InputEvent as _, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, Point, ScrollDelta, TestAppContext, Window, point, px, size,
@@ -76,6 +76,297 @@ fn edit_text(id: &str, value: &str, window: &mut Window, cx: &mut App) {
     window.click(id.to_owned(), cx);
     window.press("secondary-a", cx);
     window.input(value, cx);
+}
+
+#[gpui_kit::test]
+fn settings_open_from_toolbar_with_language_controls(cx: &mut TestAppContext) {
+    use gpui_kit::OwnedMenuItem;
+
+    cx.update(init_test_app);
+    let handle = cx.open_window(size(px(820.), px(660.)), |window, cx| {
+        let browser = cx.new(|cx| Browser::new(window, cx));
+        Root::new(browser, window, cx)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let terminal = window.find("terminal").bounds();
+        let refresh = window.find("refresh").bounds();
+        let settings = window.find("settings").bounds();
+        assert!(window.find("info").bounds().right() < terminal.left());
+        assert!(terminal.right() < refresh.left());
+        assert!(refresh.right() < settings.left());
+        assert!(settings.right() <= px(820.));
+        assert_eq!(settings.size.width, px(44.));
+        window.activate_window();
+        window.press(
+            if cfg!(target_os = "macos") {
+                "cmd-,"
+            } else {
+                "ctrl-,"
+            },
+            cx,
+        );
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("apply-language").is_some());
+        assert!(window.try_find("settings-language-choice").is_some());
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("settings", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("settings-language-choice").is_some());
+        assert!(window.find("external-language-file").visible());
+        assert!(window.find("browse-language").visible());
+        let builtin = window.within("built-in-language").find("input").bounds();
+        let external = window.find("external-language-file").bounds();
+        let browse = window.find("browse-language").bounds();
+        assert_eq!(builtin.left(), external.left());
+        assert_eq!(builtin.right(), browse.right());
+        assert!(builtin.bottom() < external.top());
+        window.within("built-in-language").click("input", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.find("built-in-language").value(),
+            Some("Simplified Chinese")
+        );
+        edit_text(
+            "external-language-file",
+            "/tmp/custom-language.toml",
+            window,
+            cx,
+        );
+        window.within("language-source").click(1usize, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.within("language-source").find(1usize).selected(),
+            Some(true)
+        );
+        assert!(window.find("built-in-language").visible());
+        assert!(window.find("browse-language").visible());
+        window.within("language-source").click(0usize, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.within("language-source").find(0usize).selected(),
+            Some(true)
+        );
+        assert_eq!(
+            window.find("external-language-file").value(),
+            Some("/tmp/custom-language.toml")
+        );
+        assert!(window.find("browse-language").visible());
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, _| window.activate_window())
+        .unwrap();
+    cx.update(|cx| {
+        let menus = cx.get_menus().unwrap();
+        let menu = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "rs7z")
+            .unwrap();
+        let OwnedMenuItem::Action { action, .. } = &menu.items[0] else {
+            panic!("Missing native Settings action");
+        };
+        assert!(action.as_any().is::<super::OpenSettings>());
+        cx.dispatch_action(action.as_ref());
+    });
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("settings-language-choice").is_some());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn zip_creation_requires_matching_passwords_and_can_reveal_them(cx: &mut TestAppContext) {
+    use std::fs;
+
+    cx.update(init_test_app);
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = fs::canonicalize(temporary.path()).unwrap();
+    fs::write(directory.join("item.txt"), b"contents").unwrap();
+    let mut browser = None;
+    let handle = cx.open_window(size(px(820.), px(660.)), |window, cx| {
+        let view = cx.new(|cx| {
+            let mut view = Browser::new(window, cx);
+            view.navigate(&directory, window, cx);
+            view
+        });
+        browser = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let browser = browser.unwrap();
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        select_item(&browser, "item.txt", window, cx);
+        window.click("add", cx);
+        assert!(window.try_find("zip-encryption").is_some());
+        assert!(window.try_find("zip-confirm-password").is_some());
+        let destination = window.find("add-destination").bounds();
+        let choose = window.find("choose-destination").bounds();
+        assert_eq!(destination.center().y, choose.center().y);
+        assert!(destination.right() < choose.left());
+        let name = window.find("operation-name").bounds();
+        let format = window.find("archive-format").bounds();
+        assert_eq!(name.top(), format.top());
+        assert!(name.right() < format.left());
+        let compression = window.find("zip-compression").bounds();
+        let password = window.find("zip-password").bounds();
+        let volume = window.find("archive-volume-size-group").bounds();
+        assert_eq!(compression.top(), password.top());
+        assert_eq!(compression.left(), volume.left());
+        assert!(compression.right() < password.left());
+        assert!(volume.right() < password.left());
+        assert!(password.right() <= choose.right());
+        assert!(choose.right() < px(820.));
+        let dialog = window.within("dialog").find(0usize).bounds();
+        assert!(dialog.size.height > px(600.));
+        assert!(dialog.top() >= px(0.) && dialog.bottom() <= px(660.));
+        window.scroll("dialog", ScrollDelta::Lines(point(0., -12.)), cx);
+        edit_text("zip-password", "s", window, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("zip-show-password", cx);
+        assert_eq!(window.find("zip-password").value(), Some("s"));
+        window.click("zip-show-password", cx);
+        assert!(window.find("zip-password-error").visible());
+        window.input("ecret", cx);
+        edit_text("zip-confirm-password", "different", window, cx);
+        window.click("confirm-operation", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("confirm-operation").is_some());
+        assert!(!browser.read(cx).busy);
+        assert!(!directory.join("item.zip").exists());
+
+        window.click("zip-show-password", cx);
+        assert_eq!(window.find("zip-show-password").checked(), Some(true));
+        assert_eq!(window.find("zip-password").value(), Some("secret"));
+        assert_eq!(
+            window.find("zip-confirm-password").value(),
+            Some("different")
+        );
+        window.click("zip-show-password", cx);
+        assert_eq!(window.find("zip-password").value(), None);
+        assert_eq!(window.find("zip-confirm-password").value(), None);
+        edit_text("zip-confirm-password", "sec", window, cx);
+        assert!(window.find("zip-password-error").visible());
+        window.input("ret", cx);
+        assert!(window.try_find("zip-password-error").is_none());
+        edit_text("zip-password", "changed", window, cx);
+        assert!(window.find("zip-password-error").visible());
+        edit_text("zip-password", "secret", window, cx);
+        assert!(window.try_find("zip-password-error").is_none());
+        window.within("zip-encryption").click("input", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("confirm-operation", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(directory.join("item.zip").exists());
+    let mut archive =
+        zip::ZipArchive::new(fs::File::open(directory.join("item.zip")).unwrap()).unwrap();
+    assert!(
+        archive
+            .get_aes_verification_key_and_salt(0)
+            .unwrap()
+            .is_some()
+    );
+    assert!(archive.by_name_decrypt("item.txt", b"secret").is_ok());
+}
+
+#[gpui_kit::test]
+fn archive_add_revalidates_passwords_as_they_change(cx: &mut TestAppContext) {
+    use std::{
+        fs::{self, File},
+        io::Write,
+    };
+    use zip::{ZipWriter, write::SimpleFileOptions};
+
+    cx.update(init_test_app);
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let temporary = tempfile::tempdir().unwrap();
+    let path = fs::canonicalize(temporary.path())
+        .unwrap()
+        .join("existing.zip");
+    let mut zip = ZipWriter::new(File::create(&path).unwrap());
+    zip.start_file("docs/item.txt", SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(b"contents").unwrap();
+    zip.finish().unwrap();
+
+    let mut browser = None;
+    let handle = cx.open_window(size(px(1060.), px(660.)), |window, cx| {
+        let view = cx.new(|cx| {
+            let mut view = Browser::new(window, cx);
+            view.navigate(&path, window, cx);
+            view
+        });
+        browser = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let browser = browser.unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        select_item(&browser, "docs", window, cx);
+        window.click("add", cx);
+        assert!(window.try_find("confirm-archive-operation").is_some());
+        window.scroll("dialog", ScrollDelta::Lines(point(0., -12.)), cx);
+        edit_text("zip-password", "abc", window, cx);
+        assert!(window.find("zip-password-error").visible());
+        window.click("confirm-archive-operation", cx);
+        assert!(window.try_find("confirm-archive-operation").is_some());
+        edit_text("zip-confirm-password", "ab", window, cx);
+        assert!(window.find("zip-password-error").visible());
+        window.input("c", cx);
+        assert!(window.try_find("zip-password-error").is_none());
+        edit_text("zip-password", "abcd", window, cx);
+        assert!(window.find("zip-password-error").visible());
+        window.click("zip-password", cx);
+        window.press("secondary-a", cx);
+        window.press("backspace", cx);
+        window.click("zip-confirm-password", cx);
+        window.press("secondary-a", cx);
+        window.press("backspace", cx);
+        assert!(window.try_find("zip-password-error").is_none());
+    })
+    .unwrap();
 }
 
 fn assert_menu_shortcuts(
@@ -158,8 +449,6 @@ fn file_operation_shortcuts_use_selection_rules_and_delete_confirmation(cx: &mut
             "extract-destination",
             Some(directory.join("contents").display().to_string()),
         ),
-        // Password inputs deliberately omit their accessible value.
-        ("contents.zip", "alt-t", "zip-password", None),
     ] {
         cx.update_window(handle.into(), |_, window, cx| {
             select_item(&browser, name, window, cx);
@@ -177,6 +466,37 @@ fn file_operation_shortcuts_use_selection_rules_and_delete_confirmation(cx: &mut
         .unwrap();
         cx.run_until_parked();
     }
+    cx.update_window(handle.into(), |_, window, cx| {
+        select_item(&browser, "contents.zip", window, cx);
+        window.press("alt-t", cx);
+        assert!(window.try_find("confirm-operation").is_none());
+        assert!(window.try_find("choose-source-file").is_none());
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("test-result-status").label(), Some("Test OK!"));
+        assert!(window.try_find("choose-source-file").is_none());
+        window.within("dialog").click("close", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        select_item(&browser, "contents.zip", window, cx);
+        window.click("test", cx);
+        assert!(window.try_find("confirm-operation").is_none());
+        assert!(window.try_find("choose-source-file").is_none());
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("test-result-status").label(), Some("Test OK!"));
+        window.within("dialog").click("close", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
     for (shortcut, control) in [("alt-r", "confirm-rename"), ("alt-i", "copy-properties")] {
         cx.update_window(handle.into(), |_, window, cx| {
             select_item(&browser, "item.txt", window, cx);
@@ -564,12 +884,18 @@ fn quit_shortcut_is_global_in_lists_inputs_and_dialogs(cx: &mut TestAppContext) 
             .iter()
             .find(|menu| menu.name.as_ref() == "rs7z")
             .unwrap();
+        let OwnedMenuItem::Action { name, action, .. } = &menu.items[0] else {
+            panic!("Missing native Settings action");
+        };
+        assert_eq!(name, "Settings…");
+        assert!(action.as_any().is::<super::OpenSettings>());
+        assert!(matches!(menu.items[1], OwnedMenuItem::Separator));
         let OwnedMenuItem::Action {
             action,
             name,
             disabled,
             ..
-        } = &menu.items[0]
+        } = &menu.items[2]
         else {
             panic!("Missing native Quit action");
         };
@@ -721,6 +1047,9 @@ fn rename_initial_cursor_respects_file_extension_and_directory_names(cx: &mut Te
                     kind,
                     size: 0,
                     modified: None,
+                    created: None,
+                    accessed: None,
+                    archive: None,
                 }];
                 browser.selection.context_click(path);
                 browser.begin_rename(window, cx);
@@ -924,6 +1253,9 @@ fn file_list_clear_and_context_menu(cx: &mut TestAppContext) {
                     kind: FileKind::Directory,
                     size: 0,
                     modified: None,
+                    created: None,
+                    accessed: None,
+                    archive: None,
                 },
                 FileItem {
                     path: second.clone(),
@@ -931,6 +1263,9 @@ fn file_list_clear_and_context_menu(cx: &mut TestAppContext) {
                     kind: FileKind::Other,
                     size: 0,
                     modified: None,
+                    created: None,
+                    accessed: None,
+                    archive: None,
                 },
                 FileItem {
                     path: archive.clone(),
@@ -938,6 +1273,9 @@ fn file_list_clear_and_context_menu(cx: &mut TestAppContext) {
                     kind: FileKind::Archive,
                     size: 0,
                     modified: None,
+                    created: None,
+                    accessed: None,
+                    archive: None,
                 },
             ];
             view
@@ -1028,8 +1366,9 @@ fn file_list_clear_and_context_menu(cx: &mut TestAppContext) {
         {
             assert_eq!(menu.find(index).label(), Some(label));
         }
-        assert_eq!(menu.find(9usize).label(), None);
-        assert_eq!(menu.find(10usize).label(), Some("Open in terminal"));
+        assert_eq!(menu.find(9usize).label(), Some("CRC"));
+        assert_eq!(menu.find(10usize).label(), None);
+        assert_eq!(menu.find(11usize).label(), Some("Open in terminal"));
     })
     .unwrap();
     assert_menu_shortcuts(
@@ -1049,6 +1388,21 @@ fn file_list_clear_and_context_menu(cx: &mut TestAppContext) {
 
     cx.update_window(handle.into(), |_, window, cx| window.press("escape", cx))
         .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        click(window, cx, point(px(300.), px(160.)), MouseButton::Right);
+        assert_eq!(browser.read(cx).selection.only(), Some(&first));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let menu = window.within("popup-menu");
+        assert_eq!(menu.find(9usize).label(), None);
+        assert_eq!(menu.find(10usize).label(), Some("Open in terminal"));
+        window.press("escape", cx);
+    })
+    .unwrap();
     cx.run_until_parked();
     cx.update_window(handle.into(), |_, window, cx| {
         click(window, cx, point(px(300.), px(224.)), MouseButton::Left);
@@ -1084,6 +1438,241 @@ fn file_list_clear_and_context_menu(cx: &mut TestAppContext) {
     .unwrap();
     cx.run_until_parked();
     cx.update(|cx| assert_eq!(browser.read(cx).selection.len(), 0));
+}
+
+#[gpui_kit::test]
+async fn crc_submenu_shows_md5_and_all_results(cx: &mut TestAppContext) {
+    use std::fs;
+
+    cx.update(init_test_app);
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = fs::canonicalize(temporary.path()).unwrap();
+    fs::write(directory.join("item.txt"), b"contents").unwrap();
+    let mut browser = None;
+    let handle = cx.open_window(size(px(1060.), px(660.)), |window, cx| {
+        let view = cx.new(|cx| {
+            let mut view = Browser::new(window, cx);
+            view.navigate(&directory, window, cx);
+            view
+        });
+        browser = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let browser = browser.unwrap();
+
+    for (index, names) in [
+        (6usize, vec!["MD5"]),
+        (
+            7,
+            vec![
+                "CRC32", "CRC64", "SHA256", "SHA1", "BLAKE2sp", "MD5", "XXH64", "SHA384", "SHA512",
+                "SHA3-256",
+            ],
+        ),
+    ] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            select_item(&browser, "item.txt", window, cx);
+            click(window, cx, point(px(300.), px(160.)), MouseButton::Right);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.within("popup-menu").hover(9usize, cx);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(1), |window, _| {
+            window.try_find("submenu").is_some()
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert_eq!(
+                window.within("submenu").find(index).label(),
+                Some(if index == 6 { "MD5" } else { "*" })
+            );
+            window.within("submenu").click(index, cx);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(5), |window, _| {
+            window.try_find("copy-checksums").is_some()
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            let first = names[0];
+            let name_cell = window.find(format!("checksum-name-{first}"));
+            let value_cell = window.find(format!("checksum-value-{first}"));
+            assert_eq!(name_cell.label(), Some(first));
+            assert!(name_cell.bounds().right() < value_cell.bounds().left());
+            window.click(format!("copy-checksum-{first}"), cx);
+            let individual = cx.read_from_clipboard().unwrap().text().unwrap();
+            assert_eq!(
+                window.find(format!("checksum-value-{first}")).label(),
+                Some(individual.as_str())
+            );
+
+            window.click("copy-checksums", cx);
+            let result = cx.read_from_clipboard().unwrap().text().unwrap();
+            let lines: Vec<_> = result.lines().skip(1).collect();
+            assert_eq!(lines.len(), names.len());
+            for (line, name) in lines.iter().zip(&names) {
+                assert!(line.starts_with(&format!("{name}: ")), "{line}");
+                let name_cell = window.find(format!("checksum-name-{name}"));
+                let value_cell = window.find(format!("checksum-value-{name}"));
+                assert_eq!(
+                    name_cell.bounds().left(),
+                    window
+                        .find(format!("checksum-name-{first}"))
+                        .bounds()
+                        .left()
+                );
+                assert_eq!(
+                    value_cell.bounds().left(),
+                    window
+                        .find(format!("checksum-value-{first}"))
+                        .bounds()
+                        .left()
+                );
+            }
+            if names.len() == 10 {
+                assert!(
+                    window.find("checksum-value-SHA512").bounds().size.height
+                        > window.find("checksum-value-MD5").bounds().size.height
+                );
+            }
+            assert_eq!(lines[0].split_once(": ").unwrap().1, individual);
+            window.press("escape", cx);
+            assert!(window.try_find("copy-checksums").is_none());
+        })
+        .unwrap();
+    }
+}
+
+#[gpui_kit::test]
+fn file_columns_resize_without_changing_selection(cx: &mut TestAppContext) {
+    use std::fs;
+
+    cx.update(init_test_app);
+    let temporary = tempfile::tempdir().unwrap();
+    let folder = fs::canonicalize(temporary.path()).unwrap();
+    let path = folder.join("item.txt");
+    fs::write(&path, b"contents").unwrap();
+    let mut browser = None;
+    let handle = cx.open_window(size(px(1060.), px(660.)), |window, cx| {
+        let view = cx.new(|cx| {
+            let mut view = Browser::new(window, cx);
+            view.navigate(&folder, window, cx);
+            view
+        });
+        browser = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let browser = browser.unwrap();
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("column-created").is_some());
+        assert!(window.try_find("column-accessed").is_some());
+        assert!(window.try_find("column-compressed-size").is_none());
+        let before = window.find("column-name").bounds().size.width;
+        let start = window.find("resize-name").bounds().center();
+        let end = point(start.x + px(48.), start.y);
+        window.dispatch_event(
+            MouseDownEvent {
+                button: MouseButton::Left,
+                position: start,
+                modifiers: Default::default(),
+                click_count: 1,
+                first_mouse: false,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.dispatch_event(
+            MouseMoveEvent {
+                position: end,
+                pressed_button: Some(MouseButton::Left),
+                modifiers: Default::default(),
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.dispatch_event(
+            MouseUpEvent {
+                button: MouseButton::Left,
+                position: end,
+                modifiers: Default::default(),
+                click_count: 1,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.render_frame(cx);
+        assert!(window.find("column-name").bounds().size.width > before + px(30.));
+        assert_eq!(
+            window.find("column-size").bounds().left(),
+            window
+                .find(format!("file-cell-{}-size", path.display()))
+                .bounds()
+                .left()
+        );
+        assert_eq!(browser.read(cx).selection.len(), 0);
+        click(window, cx, point(px(300.), px(160.)), MouseButton::Left);
+        assert_eq!(browser.read(cx).selection.only(), Some(&path));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn archive_metadata_columns_scroll_with_rows(cx: &mut TestAppContext) {
+    use std::fs;
+
+    cx.update(init_test_app);
+    let path = fs::canonicalize("tests/fixtures/zipx-deflate64.zipx").unwrap();
+    let mut browser = None;
+    let handle = cx.open_window(size(px(1060.), px(660.)), |window, cx| {
+        let view = cx.new(|cx| {
+            let mut view = Browser::new(window, cx);
+            view.navigate(&path, window, cx);
+            view
+        });
+        browser = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let browser = browser.unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(browser.read(cx).archive.is_some());
+        for column in ["compressed-size", "encrypted", "comment", "crc"] {
+            assert!(
+                window.try_find(format!("column-{column}")).is_some(),
+                "{column}"
+            );
+        }
+        let cell = |column| format!("file-cell-{}-{column}", path.join("item.txt").display());
+        assert_eq!(
+            window.find(cell("compressed-size")).label(),
+            Some("61 bytes")
+        );
+        assert_eq!(window.find(cell("encrypted")).label(), Some("No"));
+        assert_eq!(window.find(cell("comment")).label(), Some("--"));
+        assert_eq!(window.find(cell("crc")).label(), Some("89749A40"));
+        let start = window.find("column-name").bounds().left();
+        window.scroll(
+            "file-horizontal-scroll",
+            ScrollDelta::Pixels(point(px(-400.), px(0.))),
+            cx,
+        );
+        window.render_frame(cx);
+        assert!(window.find("column-name").bounds().left() < start);
+        assert!(
+            window
+                .find(format!("file-{}", path.join("item.txt").display()))
+                .visible()
+        );
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]
@@ -1161,7 +1750,7 @@ fn current_directory_info_and_terminal_from_toolbar_and_context_menu(cx: &mut Te
         if menu {
             cx.update_window(handle.into(), |_, window, cx| {
                 window.render_frame(cx);
-                window.within("popup-menu").click(10usize, cx);
+                window.within("popup-menu").click(11usize, cx);
             })
             .unwrap();
             cx.run_until_parked();
@@ -1196,6 +1785,9 @@ fn info_dialog_copies_exact_size_and_modified_seconds(cx: &mut TestAppContext) {
                 kind: FileKind::Other,
                 size: 10240,
                 modified: Some(UNIX_EPOCH),
+                created: None,
+                accessed: None,
+                archive: None,
             }];
             view.selection.context_click(path.clone());
             view
@@ -1426,6 +2018,243 @@ fn long_error_dialog_scrolls_without_hiding_controls(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn archive_test_shows_success_and_failure_results(cx: &mut TestAppContext) {
+    use std::{
+        fs::{self, File},
+        io::Write,
+    };
+    use zip::{ZipWriter, write::SimpleFileOptions};
+
+    cx.update(init_test_app);
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let temporary = tempfile::tempdir().unwrap();
+    let good = temporary.path().join("good.zip");
+    let mut zip = ZipWriter::new(File::create(&good).unwrap());
+    zip.add_directory("docs/", SimpleFileOptions::default())
+        .unwrap();
+    zip.start_file("docs/item.txt", SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(&vec![b'x'; 2048]).unwrap();
+    zip.finish().unwrap();
+    let bad = temporary.path().join("bad.zip");
+    fs::write(&bad, b"not a zip archive").unwrap();
+
+    let mut browser = None;
+    let handle = cx.open_window(size(px(1060.), px(660.)), |window, cx| {
+        let view = cx.new(|cx| Browser::new(window, cx));
+        browser = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let browser = browser.unwrap();
+    for (path, folders, files, size, status) in [
+        (
+            &good,
+            "Folder: 1",
+            "File: 1",
+            "Size: 2048 B (2.0 KB)",
+            "Test OK!",
+        ),
+        (&bad, "Folder: --", "File: --", "Size: --", "Test Failed:"),
+    ] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            browser.update(cx, |browser, cx| {
+                browser.run_operation(
+                    super::Operation::Test,
+                    vec![path.clone()],
+                    None,
+                    Default::default(),
+                    window,
+                    cx,
+                );
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(!browser.read(cx).busy);
+            assert!(window.try_find("dialog").is_some());
+            assert_eq!(
+                window.find("test-result-filename").label(),
+                Some(format!("Filename: {}", path.file_name().unwrap().to_string_lossy()).as_str())
+            );
+            assert_eq!(window.find("test-result-folders").label(), Some(folders));
+            assert_eq!(window.find("test-result-files").label(), Some(files));
+            assert_eq!(window.find("test-result-size").label(), Some(size));
+            let elapsed = window.find("test-result-elapsed-value");
+            assert!(elapsed.label().unwrap().ends_with('s'));
+            assert!(elapsed.bounds().top() > window.find("test-result-size-value").bounds().top());
+            assert_eq!(window.find("test-result-status").label(), Some(status));
+            let value_x = window.find("test-result-filename-value").bounds().left();
+            for id in [
+                "test-result-folders-value",
+                "test-result-files-value",
+                "test-result-size-value",
+                "test-result-elapsed-value",
+            ] {
+                assert_eq!(window.find(id).bounds().left(), value_x);
+            }
+            let filename = path.file_name().unwrap().to_string_lossy();
+            window.click(format!("test-result-size-copy-{filename}"), cx);
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some(size.strip_prefix("Size: ").unwrap())
+            );
+            let copy_button = window.find(format!("copy-test-result-{filename}"));
+            assert!(
+                copy_button.bounds().top() >= window.find("test-result-status").bounds().bottom()
+            );
+            window.click(format!("copy-test-result-{filename}"), cx);
+            let copied = cx.read_from_clipboard().unwrap().text().unwrap();
+            assert!(copied.starts_with(&format!(
+                "Filename: {}\n",
+                path.file_name().unwrap().to_string_lossy()
+            )));
+            assert!(copied.contains(&format!("\n{size}\n")));
+            assert!(copied.contains("\nElapsed: "));
+            assert!(copied.contains(status));
+            assert!(window.within("dialog").find("close").visible());
+            if path == &bad {
+                let details = gpui_kit::base::test_support::snapshots(window);
+                assert!(details.iter().any(|item| {
+                    item.label() == Some("Test error details")
+                        && item.value().is_some_and(|value| !value.is_empty())
+                        && copy_button.bounds().top() >= item.bounds().bottom()
+                }));
+            }
+            if path == &good {
+                window.within("dialog").click("close", cx);
+            } else {
+                window.click("cancel-progress", cx);
+            }
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+}
+
+#[gpui_kit::test]
+fn archive_test_progress_shows_elapsed_and_unknown_remaining(cx: &mut TestAppContext) {
+    use super::progress_dialog::{OperationProgressDialog, TestResult};
+    use rs7z::service::operations::ProgressHandle;
+
+    cx.update(init_test_app);
+    let mut state = None;
+    let handle = cx.open_window(size(px(820.), px(660.)), |window, cx| {
+        let view = cx.new(|cx| {
+            OperationProgressDialog::new(
+                ProgressHandle::default(),
+                Some(Instant::now() - Duration::from_secs(100)),
+                window,
+                cx,
+            )
+        });
+        state = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.find("operation-progress-elapsed").label(),
+            Some("1m40s")
+        );
+        assert_eq!(
+            window.find("operation-progress-remaining").label(),
+            Some("--")
+        );
+        state.as_ref().unwrap().update(cx, |state, cx| {
+            state.finish(
+                &Ok(()),
+                Some(TestResult::new(
+                    std::path::Path::new("example.zip"),
+                    None,
+                    None,
+                    Duration::from_millis(100_123),
+                )),
+                window,
+                cx,
+            );
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("operation-progress-elapsed").is_none());
+        assert_eq!(
+            window.find("test-result-elapsed-value").label(),
+            Some("100.123s")
+        );
+        window.click("test-result-elapsed-copy-example.zip", cx);
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some("100.123s")
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn test_prompts_for_encrypted_archives_before_running(cx: &mut TestAppContext) {
+    use std::fs;
+
+    cx.update(init_test_app);
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = fs::canonicalize(temporary.path()).unwrap();
+    let source = directory.join("item.txt");
+    fs::write(&source, b"encrypted contents").unwrap();
+    for (name, format, encryption) in [
+        ("encrypted.zip", "-tzip", "-mem=ZipCrypto"),
+        ("encrypted.7z", "-t7z", "-mhe=on"),
+    ] {
+        let output = rs7z::service::seven_zip_cli::command()
+            .unwrap()
+            .args(["a", format, "-psecret", encryption, "--"])
+            .arg(directory.join(name))
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
+
+    let mut browser = None;
+    let handle = cx.open_window(size(px(1060.), px(660.)), |window, cx| {
+        let view = cx.new(|cx| {
+            let mut view = Browser::new(window, cx);
+            view.navigate(&directory, window, cx);
+            view
+        });
+        browser = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let browser = browser.unwrap();
+
+    for name in ["encrypted.zip", "encrypted.7z"] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            select_item(&browser, name, window, cx);
+            window.click("test", cx);
+            assert!(window.try_find("confirm-operation").is_none());
+            assert!(window.try_find("choose-source-file").is_none());
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("archive-open-password").is_some());
+            assert!(window.try_find("test-result-status").is_none());
+            edit_text("archive-open-password", "secret", window, cx);
+            window.click("unlock-archive", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("test-result-status").label(), Some("Test OK!"));
+            window.click("cancel-progress", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+}
+
+#[gpui_kit::test]
 fn operation_progress_dialog_cancels_before_closing(cx: &mut TestAppContext) {
     cx.update(init_test_app);
     let mut browser = None;
@@ -1435,52 +2264,63 @@ fn operation_progress_dialog_cancels_before_closing(cx: &mut TestAppContext) {
         Root::new(view, window, cx)
     });
     let browser = browser.unwrap();
-    cx.update_window(handle.into(), |_, window, cx| {
-        browser.update(cx, |browser, cx| {
-            browser.busy = true;
-            browser.launch_progress(
-                "Copying items",
-                false,
-                |progress| {
-                    let started = Instant::now();
-                    while !progress.is_cancelled() && started.elapsed() < Duration::from_secs(3) {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    if progress.is_cancelled() {
-                        Err(OperationError::Cancelled)
-                    } else {
-                        Ok(())
-                    }
-                },
-                window,
-                cx,
+    for title in ["Adding to archive", "Extracting archive"] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            browser.update(cx, |browser, cx| {
+                browser.busy = true;
+                browser.launch_progress(
+                    title,
+                    false,
+                    |progress| {
+                        let started = Instant::now();
+                        while !progress.is_cancelled() && started.elapsed() < Duration::from_secs(3)
+                        {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        if progress.is_cancelled() {
+                            Err(OperationError::Cancelled)
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    window,
+                    cx,
+                );
+            });
+        })
+        .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("dialog").is_some());
+            assert!(window.try_find("cancel-progress").is_some());
+            let progress = window.find("progress-width").bounds().size;
+            assert!(progress.width > window.rem_size() * 27.);
+            assert_eq!(progress.height, px(14.));
+            assert!(window.find("operation-progress-elapsed").visible());
+            assert_eq!(
+                window.find("operation-progress-remaining").label(),
+                Some("--")
             );
-        });
-    })
-    .unwrap();
-    cx.update_window(handle.into(), |_, window, cx| {
-        window.render_frame(cx);
-        assert!(window.try_find("dialog").is_some());
-        assert!(window.try_find("cancel-progress").is_some());
-        assert!(browser.read(cx).busy);
-        window.click("cancel-progress", cx);
-    })
-    .unwrap();
-    cx.run_until_parked();
-    cx.update_window(handle.into(), |_, window, cx| {
-        window.render_frame(cx);
-        assert!(!browser.read(cx).busy);
-        assert!(window.try_find("dialog").is_none());
-        assert!(
-            browser
-                .read(cx)
-                .status
-                .as_deref()
-                .unwrap()
-                .contains("cancelled")
-        );
-    })
-    .unwrap();
+            assert!(browser.read(cx).busy);
+            window.click("cancel-progress", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(!browser.read(cx).busy);
+            assert!(window.try_find("dialog").is_none());
+            assert!(
+                browser
+                    .read(cx)
+                    .status
+                    .as_deref()
+                    .unwrap()
+                    .contains("cancelled")
+            );
+        })
+        .unwrap();
+    }
 
     cx.update_window(handle.into(), |_, window, cx| {
         browser.update(cx, |browser, cx| {
@@ -1662,6 +2502,12 @@ fn output_dialog_cancels_then_waits_for_explicit_close(cx: &mut TestAppContext) 
         window.render_frame(cx);
         assert!(browser.read(cx).busy);
         assert!(window.try_find("operation-progress").is_none());
+        assert!(window.find("operation-progress-elapsed").visible());
+        assert_eq!(
+            window.find("operation-progress-remaining").label(),
+            Some("--")
+        );
+
         window.click("cancel-progress", cx);
         assert!(window.try_find("dialog").is_some());
     })
@@ -1679,6 +2525,21 @@ fn output_dialog_cancels_then_waits_for_explicit_close(cx: &mut TestAppContext) 
                 .contains("cancelled")
         );
         assert!(window.try_find("dialog").is_some());
+
+        let elapsed = window
+            .find("operation-progress-elapsed")
+            .label()
+            .unwrap()
+            .to_owned();
+        window.render_frame(cx);
+        assert_eq!(
+            window.find("operation-progress-elapsed").label(),
+            Some(elapsed.as_str())
+        );
+        assert_eq!(
+            window.find("operation-progress-remaining").label(),
+            Some("0s")
+        );
         window.press("escape", cx);
     })
     .unwrap();
@@ -1983,6 +2844,132 @@ fn encrypted_archive_navigation_requires_verified_password(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
+fn tar_format_selector_creates_posix_tar(cx: &mut TestAppContext) {
+    use std::fs;
+
+    cx.update(init_test_app);
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = fs::canonicalize(temporary.path()).unwrap();
+    fs::write(directory.join("item.txt"), b"tar contents").unwrap();
+    let mut browser = None;
+    let handle = cx.open_window(size(px(1060.), px(660.)), |window, cx| {
+        let view = cx.new(|cx| {
+            let mut view = Browser::new(window, cx);
+            view.navigate(&directory, window, cx);
+            view
+        });
+        browser = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let browser = browser.unwrap();
+    cx.update_window(handle.into(), |_, window, cx| {
+        select_item(&browser, "item.txt", window, cx);
+        window.click("add", cx);
+        window.within("archive-format").click("input", cx);
+        window.press("down", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("operation-name").value(), Some("item.tar"));
+        assert!(window.try_find("tar-format").is_some());
+        assert!(window.try_find("zip-compression").is_none());
+        window.within("tar-format").click("input", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("confirm-operation", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let bytes = fs::read(directory.join("item.tar")).unwrap();
+    assert_eq!(&bytes[257..263], b"ustar\0");
+}
+
+#[gpui_kit::test]
+fn seven_zip_method_selector_updates_related_fields(cx: &mut TestAppContext) {
+    use std::fs;
+
+    cx.update(init_test_app);
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = fs::canonicalize(temporary.path()).unwrap();
+    fs::write(directory.join("item.txt"), b"7z contents").unwrap();
+    let mut browser = None;
+    let handle = cx.open_window(size(px(1060.), px(660.)), |window, cx| {
+        let view = cx.new(|cx| {
+            let mut view = Browser::new(window, cx);
+            view.navigate(&directory, window, cx);
+            view
+        });
+        browser = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let browser = browser.unwrap();
+    cx.update_window(handle.into(), |_, window, cx| {
+        select_item(&browser, "item.txt", window, cx);
+        window.click("add", cx);
+        window.within("archive-format").click("input", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.scroll("dialog", ScrollDelta::Lines(point(0., -20.)), cx);
+        for id in ["7z-method", "7z-dictionary", "7z-word", "7z-solid"] {
+            assert!(window.try_find(id).is_some(), "missing {id}");
+        }
+        let level = window.find("zip-compression").bounds();
+        let volume = window.find("archive-volume-size-group").bounds();
+        let method = window.find("7z-method").bounds();
+        assert!(level.bottom() < volume.top());
+        assert!(volume.bottom() < method.top());
+        assert_eq!(level.left(), volume.left());
+        window.within("7z-method").click("input", cx);
+        window.press("down", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("7z-word").is_some());
+        window.within("7z-method").click("input", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("7z-dictionary").is_none());
+        assert!(window.try_find("7z-word").is_none());
+        assert!(window.try_find("7z-solid").is_some());
+        window.click("confirm-operation", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let path = directory.join("item.7z");
+    assert!(path.exists());
+    let listing = rs7z::service::seven_zip_cli::command()
+        .unwrap()
+        .args(["l", "-slt", "--"])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&listing.stdout).contains("Method = BZip2"));
+}
+
+#[gpui_kit::test]
 fn seven_zip_creation_dialog_switches_format_and_creates_volumes(cx: &mut TestAppContext) {
     creation_dialog_creates_volumes(cx, "7z");
 }
@@ -2031,12 +3018,41 @@ fn creation_dialog_creates_volumes(cx: &mut TestAppContext, format: &str) {
             Some(format!("large.{format}").as_str())
         );
         assert!(window.try_find("archive-volume-size").is_some());
+        window.scroll("dialog", ScrollDelta::Lines(point(0., -20.)), cx);
+        window.click("archive-volume-size-presets", cx);
+        let mut menu = window.within("popup-menu");
+        for (index, label) in [
+            "10M",
+            "100M",
+            "1000M",
+            "650M - CD",
+            "700M - CD",
+            "4092M - FAT",
+            "4480M - DVD",
+            "8128M - DVD DL",
+            "23040M - BD",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(menu.find(index).label(), Some(label));
+        }
+        menu.click(3usize, cx);
+        assert_eq!(window.find("archive-volume-size").value(), Some("650M"));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("archive-volume-size-presets", cx);
+        window.within("popup-menu").click(8usize, cx);
+        assert_eq!(window.find("archive-volume-size").value(), Some("23040M"));
         edit_text("archive-volume-size", "0M", window, cx);
         window.click("confirm-operation", cx);
         assert!(window.try_find("confirm-operation").is_some());
         assert!(!browser.read(cx).busy);
         edit_text("archive-volume-size", "1K", window, cx);
-        window.scroll("dialog", ScrollDelta::Lines(point(0., -12.)), cx);
+        window.scroll("dialog", ScrollDelta::Lines(point(0., 20.)), cx);
         window.within("zip-compression").click("input", cx);
         window.press("down", cx);
         window.press("enter", cx);
@@ -2045,6 +3061,14 @@ fn creation_dialog_creates_volumes(cx: &mut TestAppContext, format: &str) {
     cx.run_until_parked();
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
+        if format == "7z" {
+            for id in ["7z-method", "7z-dictionary", "7z-word", "7z-solid"] {
+                assert!(
+                    window.try_find(id).is_none(),
+                    "unexpected {id} in Store mode"
+                );
+            }
+        }
         window.click("confirm-operation", cx);
     })
     .unwrap();
@@ -2119,11 +3143,11 @@ fn tar_creation_formats_hide_password_and_volume_controls_and_browse_nested_path
     });
     let browser = browser.unwrap();
     for (steps, suffix) in [
-        (2, "tar.gz"),
-        (3, "tar.bz2"),
-        (4, "tar.xz"),
-        (5, "tar.lzma"),
-        (6, "tar.zst"),
+        (3, "tar.gz"),
+        (4, "tar.bz2"),
+        (5, "tar.xz"),
+        (6, "tar.lzma"),
+        (7, "tar.zst"),
     ] {
         cx.update_window(handle.into(), |_, window, cx| {
             select_item(&browser, "docs", window, cx);

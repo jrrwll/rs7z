@@ -20,6 +20,9 @@ pub fn read_item(path: &Path) -> std::io::Result<FileItem> {
         kind,
         size: metadata.len(),
         modified: metadata.modified().ok(),
+        created: metadata.created().ok(),
+        accessed: metadata.accessed().ok(),
+        archive: None,
     })
 }
 
@@ -44,6 +47,9 @@ pub fn read_directory(path: &Path) -> std::io::Result<Vec<FileItem>> {
             kind,
             size: metadata.len(),
             modified: metadata.modified().ok(),
+            created: metadata.created().ok(),
+            accessed: metadata.accessed().ok(),
+            archive: None,
         });
     }
     items.sort_by(|a, b| {

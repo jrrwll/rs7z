@@ -4,6 +4,7 @@ use super::{
 };
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::*;
+use rs7z::i18n::{tr, trf};
 use rs7z::model::archive::ArchiveIndex;
 use rs7z::model::config::TerminalConfig;
 use rs7z::model::file::{FileItem, FileKind};
@@ -36,7 +37,7 @@ impl Browser {
                 (TerminalConfig::Disabled, Some(error))
             }
         };
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search files"));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder(tr("Search files")));
         let path_input = cx
             .new(|cx| InputState::new(window, cx).default_value(current_dir.display().to_string()));
         let search_subscription =
@@ -56,7 +57,6 @@ impl Browser {
             });
         let mut browser = Self {
             current_dir: current_dir.clone(),
-            starting_dir: current_dir.clone(),
             files,
             selection: Default::default(),
             history: vec![current_dir],
@@ -72,10 +72,13 @@ impl Browser {
             archive: None,
             archive_password: None,
             list_scroll: UniformListScrollHandle::new(),
+            horizontal_scroll: ScrollHandle::default(),
+            column_widths: Default::default(),
+            resizing_column: None,
             _subscriptions: vec![search_subscription, path_subscription],
         };
         if let Some(error) = config_error {
-            browser.show_error("Cannot load configuration", error, window, cx);
+            browser.show_error(tr("Cannot load configuration"), error, window, cx);
         }
         browser
     }
@@ -111,7 +114,7 @@ impl Browser {
                     );
                 } else {
                     self.show_error(
-                        "Cannot browse this file",
+                        tr("Cannot browse this file"),
                         archive::extract_only_message(&archive_path),
                         window,
                         cx,
@@ -128,7 +131,7 @@ impl Browser {
             }
             self.busy = true;
             if record_history || history_index.is_some() {
-                self.status = Some("Reading archive…".into());
+                self.status = Some(tr("Reading archive…"));
             }
             cx.notify();
             cx.spawn_in(window, async move |view, cx| {
@@ -192,7 +195,7 @@ impl Browser {
                             }
                         }
                         Err(error) => {
-                            this.show_error("Cannot open archive", error, window, cx);
+                            this.show_error(tr("Cannot open archive"), error, window, cx);
                         }
                     }
                 })
@@ -209,8 +212,14 @@ impl Browser {
             }
             Err(error) => {
                 self.show_error(
-                    "Cannot open folder",
-                    format!("Cannot open {}: {error}", path.display()),
+                    tr("Cannot open folder"),
+                    trf(
+                        "Cannot open %{path}: %{error}",
+                        &[
+                            ("path", path.display().to_string()),
+                            ("error", error.to_string()),
+                        ],
+                    ),
                     window,
                     cx,
                 );
@@ -261,6 +270,8 @@ impl Browser {
         self.selection.clear();
         self.list_scroll
             .scroll_to_item_strict(0, ScrollStrategy::Top);
+        self.horizontal_scroll.set_offset(point(px(0.), px(0.)));
+        self.resizing_column = None;
         self.search.clear();
         self.search_input
             .update(cx, |input, cx| input.set_value("", window, cx));

@@ -1,5 +1,7 @@
 use std::{path::PathBuf, time::SystemTime};
 
+use super::archive::ArchiveEntryMetadata;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileKind {
     Directory,
@@ -14,4 +16,7 @@ pub struct FileItem {
     pub kind: FileKind,
     pub size: u64,
     pub modified: Option<SystemTime>,
+    pub created: Option<SystemTime>,
+    pub accessed: Option<SystemTime>,
+    pub archive: Option<ArchiveEntryMetadata>,
 }

@@ -197,6 +197,7 @@ fn zip_options_create_aes_archive_without_zipcrypto() {
     let archive = root.join("encrypted.zip");
     let mut options = ZipOptions::default();
     options.password = Some("secret".into());
+    options.zip_encryption = rs7z::model::zip::ZipEncryption::Aes256;
     options.compression_level = Some(CompressionLevel::Store);
     add_many_with_options(&[source], &archive, &options, &ProgressHandle::default()).unwrap();
     let error =

@@ -5,11 +5,12 @@ use gpui_kit::component::input::Input;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use rs7z::i18n::tr;
 use rs7z::service::config;
 use std::path::Path;
 
 impl Browser {
-    pub(super) fn toolbar_content(icon: IconName, label: &'static str) -> impl IntoElement {
+    pub(super) fn toolbar_content(icon: IconName, label: String) -> impl IntoElement {
         v_flex()
             .items_center()
             .gap_1()
@@ -36,9 +37,9 @@ impl Browser {
                     .ghost()
                     .h(px(54.))
                     .w(px(76.))
-                    .accessibility_label("Add to archive")
+                    .accessibility_label(tr("Add to archive"))
                     .disabled(!self.can_add())
-                    .child(Self::toolbar_content(IconName::Plus, "Add…"))
+                    .child(Self::toolbar_content(IconName::Plus, tr("Add…")))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.begin_operation(Operation::Add, window, cx)
                     })),
@@ -49,9 +50,9 @@ impl Browser {
                     .ghost()
                     .h(px(54.))
                     .w(px(76.))
-                    .accessibility_label("Extract archive")
+                    .accessibility_label(tr("Extract archive"))
                     .disabled(!can_extract_or_test)
-                    .child(Self::toolbar_content(IconName::ArchiveRestore, "Extract…"))
+                    .child(Self::toolbar_content(IconName::ArchiveRestore, tr("Extract…")))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.begin_operation(Operation::Extract, window, cx)
                     })),
@@ -62,9 +63,9 @@ impl Browser {
                     .ghost()
                     .h(px(54.))
                     .w(px(76.))
-                    .accessibility_label("Test archive")
+                    .accessibility_label(tr("Test archive"))
                     .disabled(!self.is_testable())
-                    .child(Self::toolbar_content(IconName::CheckCheck, "Test…"))
+                    .child(Self::toolbar_content(IconName::CheckCheck, tr("Test…")))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.begin_operation(Operation::Test, window, cx)
                     })),
@@ -75,9 +76,9 @@ impl Browser {
                     .ghost()
                     .h(px(54.))
                     .w(px(76.))
-                    .accessibility_label("Copy item")
+                    .accessibility_label(tr("Copy item"))
                     .disabled(!has_item)
-                    .child(Self::toolbar_content(IconName::Copy, "Copy…"))
+                    .child(Self::toolbar_content(IconName::Copy, tr("Copy…")))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.begin_operation(Operation::Copy, window, cx)
                     })),
@@ -88,9 +89,9 @@ impl Browser {
                     .ghost()
                     .h(px(54.))
                     .w(px(76.))
-                    .accessibility_label("Move item")
+                    .accessibility_label(tr("Move item"))
                     .disabled(!has_item || !mutable)
-                    .child(Self::toolbar_content(IconName::MoveRight, "Move…"))
+                    .child(Self::toolbar_content(IconName::MoveRight, tr("Move…")))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.begin_operation(Operation::Move, window, cx)
                     })),
@@ -101,9 +102,9 @@ impl Browser {
                     .ghost()
                     .h(px(54.))
                     .w(px(76.))
-                    .accessibility_label("Delete item")
+                    .accessibility_label(tr("Delete item"))
                     .disabled(!has_item || !mutable)
-                    .child(Self::toolbar_content(IconName::Trash, "Delete"))
+                    .child(Self::toolbar_content(IconName::Trash, tr("Delete")))
                     .on_click(cx.listener(|this, _, window, cx| this.delete_selected(window, cx))),
             )
             .child(
@@ -112,9 +113,9 @@ impl Browser {
                     .ghost()
                     .h(px(54.))
                     .w(px(76.))
-                    .accessibility_label("Rename item")
+                    .accessibility_label(tr("Rename item"))
                     .disabled(!has_single || !mutable)
-                    .child(Self::toolbar_content(IconName::Pencil, "Rename…"))
+                    .child(Self::toolbar_content(IconName::Pencil, tr("Rename…")))
                     .on_click(cx.listener(|this, _, window, cx| this.begin_rename(window, cx))),
             )
             .child(
@@ -123,38 +124,53 @@ impl Browser {
                     .ghost()
                     .h(px(54.))
                     .w(px(76.))
-                    .accessibility_label("Show item information")
+                    .accessibility_label(tr("Show item information"))
                     .disabled(!self.can_show_info())
-                    .child(Self::toolbar_content(IconName::Info, "Info…"))
+                    .child(Self::toolbar_content(IconName::Info, tr("Info…")))
                     .on_click(cx.listener(|this, _, window, cx| this.show_info(window, cx))),
             )
             .child(div().flex_1())
             .when(self.archive.is_none(), |bar| bar.child(
                 Button::new("terminal")
-                    .small()
+                    .large()
                     .ghost()
+                    .h(px(44.))
+                    .w(px(44.))
                     .icon(IconName::Terminal)
-                    .tooltip(if config::is_available(&self.terminal) {
+                    .tooltip(tr(if config::is_available(&self.terminal) {
                         "Open folder in terminal"
                     } else {
                         "Configure custom_terminal or custom_terminal_cmd to open folders in a terminal"
-                    })
-                    .accessibility_label("Open in terminal")
+                    }))
+                    .accessibility_label(tr("Open in terminal"))
                     .disabled(!self.can_open_terminal())
                     .on_click(cx.listener(|this, _, window, cx| this.open_in_terminal(window, cx))),
             ))
             .child(
                 Button::new("refresh")
-                    .small()
+                    .large()
                     .ghost()
+                    .h(px(44.))
+                    .w(px(44.))
                     .icon(IconName::RefreshCw)
-                    .tooltip("Refresh")
-                    .accessibility_label("Refresh")
+                    .tooltip(tr("Refresh"))
+                    .accessibility_label(tr("Refresh"))
                     .disabled(self.busy)
                     .on_click(cx.listener(|this, _, window, cx| {
                         let path = this.current_dir.clone();
                         this.load_directory(&path, window, cx);
                     })),
+            )
+            .child(
+                Button::new("settings")
+                    .large()
+                    .ghost()
+                    .h(px(44.))
+                    .w(px(44.))
+                    .icon(IconName::Settings)
+                    .tooltip(tr("Settings"))
+                    .accessibility_label(tr("Settings"))
+                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
             )
     }
 
@@ -171,8 +187,8 @@ impl Browser {
                     .small()
                     .ghost()
                     .icon(IconName::ChevronLeft)
-                    .tooltip("Back")
-                    .accessibility_label("Back")
+                    .tooltip(tr("Back"))
+                    .accessibility_label(tr("Back"))
                     .disabled(self.busy || self.history_index == 0)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.travel(this.history_index - 1, window, cx)
@@ -183,8 +199,8 @@ impl Browser {
                     .small()
                     .ghost()
                     .icon(IconName::ChevronRight)
-                    .tooltip("Forward")
-                    .accessibility_label("Forward")
+                    .tooltip(tr("Forward"))
+                    .accessibility_label(tr("Forward"))
                     .disabled(self.busy || self.history_index + 1 >= self.history.len())
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.travel(this.history_index + 1, window, cx)
@@ -195,8 +211,8 @@ impl Browser {
                     .small()
                     .ghost()
                     .icon(IconName::ArrowUp)
-                    .tooltip("Enclosing folder")
-                    .accessibility_label("Enclosing folder")
+                    .tooltip(tr("Enclosing folder"))
+                    .accessibility_label(tr("Enclosing folder"))
                     .disabled(self.busy || self.current_dir.parent().is_none())
                     .on_click(cx.listener(|this, _, window, cx| {
                         if let Some(parent) = this.current_dir.parent().map(Path::to_path_buf) {
@@ -213,7 +229,7 @@ impl Browser {
             .child(
                 Button::new("go")
                     .small()
-                    .label("Go")
+                    .label(tr("Go"))
                     .disabled(self.busy)
                     .on_click(cx.listener(|this, _, window, cx| this.go_to_path(window, cx))),
             )

@@ -383,13 +383,14 @@ impl SevenZipOutput {
 }
 
 fn run_7z_progress(command: Command, progress: &ProgressHandle) -> Result<(), SevenZipError> {
-    run_7z_progress_output(command, progress, None)
+    run_7z_progress_output(command, progress, None, false)
 }
 
 fn run_7z_progress_output(
     command: Command,
     progress: &ProgressHandle,
     output_file: Option<fs::File>,
+    capture_stdout: bool,
 ) -> Result<(), SevenZipError> {
     progress.check()?;
     // Output switches must precede `--`, which terminates 7z option parsing.
@@ -400,7 +401,9 @@ fn run_7z_progress_output(
         } else {
             "-bsp1"
         },
-        if output_file.is_none() && (logging::is_verbose() || progress.shows_output()) {
+        if capture_stdout
+            || (output_file.is_none() && (logging::is_verbose() || progress.shows_output()))
+        {
             "-bso1"
         } else {
             "-bso0"
@@ -594,7 +597,16 @@ pub(super) fn run_archive_command_to_file(
     output: fs::File,
     progress: &ProgressHandle,
 ) -> Result<(), OperationError> {
-    run_7z_progress_output(command, progress, Some(output)).map_err(Into::into)
+    run_7z_progress_output(command, progress, Some(output), false).map_err(Into::into)
+}
+
+/// Capture textual 7zz output while stderr continues to drive cancellation and progress.
+pub(super) fn run_archive_command_capture_to_file(
+    command: Command,
+    output: fs::File,
+    progress: &ProgressHandle,
+) -> Result<(), OperationError> {
+    run_7z_progress_output(command, progress, Some(output), true).map_err(Into::into)
 }
 
 pub fn add_many_with_progress(
@@ -616,6 +628,9 @@ pub fn add_many_with_options(
     }
     let format = super::archive::format(destination)
         .ok_or_else(|| failure("Choose a supported archive path."))?;
+    if format != ArchiveFormat::SevenZip && options.seven_zip != Default::default() {
+        return Err(failure("7z compression settings require a 7z archive."));
+    }
     if super::archive::is_extract_only(destination) {
         return Err(failure(super::archive::extract_only_message(destination)));
     }
@@ -689,6 +704,9 @@ pub fn add_many_with_options(
         "-spd",
     ]);
     super::zip::command_options(&mut command, options, true, format);
+    if format == ArchiveFormat::SevenZip {
+        super::zip::seven_zip_command_options(&mut command, options)?;
+    }
     if let Some(size) = options.volume_size {
         command.arg(format!("-v{size}b"));
     }

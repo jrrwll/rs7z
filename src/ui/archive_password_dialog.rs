@@ -1,15 +1,17 @@
-use super::Browser;
+use super::{Browser, Operation};
 use gpui_kit::base::StyledExt as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, v_flex,
 };
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
+    checkbox::Checkbox,
     dialog::{DialogClose, DialogFooter},
     input::{Input, InputEvent, InputState},
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use rs7z::i18n::tr;
 use rs7z::model::{archive::ArchiveIndex, file::FileItem, operations::OperationError};
 use rs7z::service::{archive, logging, operations::ProgressHandle};
 use std::path::PathBuf;
@@ -22,8 +24,13 @@ pub(super) struct ArchiveNavigation {
     pub(super) history_index: Option<usize>,
 }
 
+enum PasswordPurpose {
+    Open(ArchiveNavigation),
+    Test(PathBuf),
+}
+
 pub(super) struct ArchivePasswordDialog {
-    navigation: Option<ArchiveNavigation>,
+    purpose: Option<PasswordPurpose>,
     browser: Entity<Browser>,
     password: Entity<InputState>,
     progress: ProgressHandle,
@@ -39,10 +46,30 @@ impl ArchivePasswordDialog {
         window: &mut Window,
         cx: &mut App,
     ) {
-        logging::info(format!(
-            "Password required to open archive: {}",
-            navigation.index.path.display()
-        ));
+        Self::open_with_purpose(PasswordPurpose::Open(navigation), browser, window, cx);
+    }
+
+    pub(super) fn open_for_test(
+        path: PathBuf,
+        browser: Entity<Browser>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        Self::open_with_purpose(PasswordPurpose::Test(path), browser, window, cx);
+    }
+
+    fn open_with_purpose(
+        purpose: PasswordPurpose,
+        browser: Entity<Browser>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let testing = matches!(purpose, PasswordPurpose::Test(_));
+        let path = match &purpose {
+            PasswordPurpose::Open(navigation) => &navigation.index.path,
+            PasswordPurpose::Test(path) => path,
+        };
+        logging::info(format!("Password required for archive: {}", path.display()));
         let progress = ProgressHandle::default();
         let cancel = progress.clone();
         let restore = browser.clone();
@@ -50,7 +77,7 @@ impl ArchivePasswordDialog {
             let password = cx.new(|cx| {
                 InputState::new(window, cx)
                     .masked(true)
-                    .placeholder("Archive password")
+                    .placeholder(tr("Archive password"))
             });
             let subscription = cx.subscribe(&password, |this: &mut Self, _, event, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -59,7 +86,7 @@ impl ArchivePasswordDialog {
                 }
             });
             Self {
-                navigation: Some(navigation),
+                purpose: Some(purpose),
                 browser,
                 password,
                 progress,
@@ -77,7 +104,11 @@ impl ArchivePasswordDialog {
             let checking = state.read(cx).checking;
             let empty = state.read(cx).password.read(cx).value().is_empty();
             dialog
-                .title("Open encrypted archive")
+                .title(tr(if testing {
+                    "Test encrypted archive"
+                } else {
+                    "Open encrypted archive"
+                }))
                 .width(window.rem_size() * 30.)
                 .close_button(true)
                 .child(state.clone())
@@ -87,20 +118,27 @@ impl ArchivePasswordDialog {
                 })
                 .on_close(move |_, window, cx| {
                     cancel.cancel();
-                    restore.update(cx, |browser, cx| {
-                        browser.path_input.update(cx, |input, cx| {
-                            input.set_value(browser.current_dir.display().to_string(), window, cx)
+                    if !testing {
+                        restore.update(cx, |browser, cx| {
+                            browser.path_input.update(cx, |input, cx| {
+                                input.set_value(
+                                    browser.current_dir.display().to_string(),
+                                    window,
+                                    cx,
+                                )
+                            });
                         });
-                    });
+                    }
                 })
                 .footer(
                     DialogFooter::new()
                         .child(
-                            DialogClose::new().trigger(|button| button.label("Cancel").outline()),
+                            DialogClose::new()
+                                .trigger(|button| button.label(tr("Cancel")).outline()),
                         )
                         .child(
                             Button::new("unlock-archive")
-                                .label("Open")
+                                .label(tr(if testing { "Test" } else { "Open" }))
                                 .primary()
                                 .loading(checking)
                                 .disabled(checking || empty)
@@ -125,11 +163,21 @@ impl ArchivePasswordDialog {
         }
         let password = self.password.read(cx).value().to_string();
         if password.is_empty() {
-            self.error = Some("Enter the archive password.".into());
+            self.error = Some(tr("Enter the archive password."));
             cx.notify();
             return;
         }
-        let Some(navigation) = self.navigation.as_ref() else {
+        if let Some(PasswordPurpose::Test(path)) = &self.purpose {
+            let path = path.clone();
+            let mut options = rs7z::model::archive::ArchiveOptions::default();
+            options.password = Some(password);
+            window.close_dialog(cx);
+            self.browser.update(cx, |browser, cx| {
+                browser.run_operation(Operation::Test, vec![path], None, options, window, cx)
+            });
+            return;
+        }
+        let Some(PasswordPurpose::Open(navigation)) = self.purpose.as_ref() else {
             return;
         };
         let path = navigation.index.path.clone();
@@ -158,7 +206,7 @@ impl ArchivePasswordDialog {
                 this.checking = false;
                 match result {
                     Ok((password, index, files)) => {
-                        if let Some(mut navigation) = this.navigation.take() {
+                        if let Some(PasswordPurpose::Open(mut navigation)) = this.purpose.take() {
                             navigation.index = index;
                             navigation.files = files;
                             this.browser.update(cx, |browser, cx| {
@@ -187,23 +235,38 @@ impl Render for ArchivePasswordDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .gap_3()
-            .when_some(self.navigation.as_ref(), |body, navigation| {
+            .when_some(self.purpose.as_ref(), |body, purpose| {
+                let path = match purpose {
+                    PasswordPurpose::Open(navigation) => &navigation.index.path,
+                    PasswordPurpose::Test(path) => path,
+                };
                 body.child(
                     div()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child(navigation.index.path.display().to_string()),
+                        .child(path.display().to_string()),
                 )
             })
-            .child(div().text_sm().font_semibold().child("Password"))
+            .child(div().text_sm().font_semibold().child(tr("Password")))
             .child(
                 Input::new(&self.password)
                     .id("archive-open-password")
                     .small()
                     .disabled(self.checking),
             )
+            .child(
+                Checkbox::new("archive-show-password")
+                    .label(tr("Show password"))
+                    .checked(!self.password.read(cx).presentation().is_masked())
+                    .disabled(self.checking)
+                    .on_click(cx.listener(|this, checked, window, cx| {
+                        this.password
+                            .update(cx, |input, cx| input.set_masked(!checked, window, cx));
+                        cx.notify();
+                    })),
+            )
             .when(self.checking, |body| {
-                body.child(div().text_sm().child("Checking password…"))
+                body.child(div().text_sm().child(tr("Checking password…")))
             })
             .when_some(self.error.clone(), |body, error| {
                 body.child(

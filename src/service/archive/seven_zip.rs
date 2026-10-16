@@ -2,8 +2,8 @@ use super::{
     ArchiveBackend, build_index, destination_directory, join, rename_target, validate_name, within,
 };
 use crate::model::{
-    archive::ArchiveOptions,
     archive::{ArchiveDestination, ArchiveEntry, ArchiveFormat, ArchiveIndex, ArchiveOperation},
+    archive::{ArchiveEntryMetadata, ArchiveOptions},
     operations::OperationError,
 };
 use crate::service::{
@@ -229,22 +229,49 @@ pub(super) fn parse_listing(
         } else {
             *name
         };
-        encrypted |= fields.get("Encrypted") == Some(&"+");
+        let entry_encrypted = match fields.get("Encrypted").copied() {
+            Some("+") => Some(true),
+            Some("-") => Some(false),
+            _ => None,
+        };
+        encrypted |= entry_encrypted == Some(true);
         let size = fields
             .get("Size")
             .ok_or("Invalid 7z entry metadata: missing size")?
             .parse::<u64>()
             .map_err(|_| "Invalid 7z entry size")?;
-        let modified = fields
-            .get("Modified")
-            .and_then(|value| NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f").ok())
-            .and_then(|time| Local.from_local_datetime(&time).single())
-            .map(Into::into);
+        let timestamp = |key| {
+            fields
+                .get(key)
+                .and_then(|value| NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f").ok())
+                .and_then(|time| Local.from_local_datetime(&time).single())
+                .map(Into::into)
+        };
         entries.push(ArchiveEntry {
             name: name.trim_end_matches('/').to_owned(),
             directory,
             size,
-            modified,
+            modified: timestamp("Modified"),
+            created: timestamp("Created"),
+            accessed: timestamp("Accessed"),
+            metadata: ArchiveEntryMetadata {
+                // TAR's packed size describes the inner TAR record, not the
+                // individual entry's share of the outer compressed stream.
+                compressed_size: (!super::is_tar(format))
+                    .then(|| {
+                        fields
+                            .get("Packed Size")
+                            .and_then(|value| value.parse().ok())
+                    })
+                    .flatten(),
+                encrypted: entry_encrypted,
+                comment: fields.get("Comment").map(|value| (*value).to_owned()),
+                crc32: fields.get("CRC").and_then(|value| {
+                    (value.len() == 8)
+                        .then(|| u32::from_str_radix(value, 16).ok())
+                        .flatten()
+                }),
+            },
         });
     }
     build_index(path, format, encrypted, entries)
@@ -394,6 +421,11 @@ fn apply_staged(
         "-spd",
     ]);
     zip::command_options(&mut command, options, true, index.format);
+    if index.format == ArchiveFormat::SevenZip {
+        zip::seven_zip_command_options(&mut command, options)?;
+    } else if options.seven_zip != Default::default() {
+        return Err(failed("7z compression settings require a 7z archive."));
+    }
     command.arg("--").arg(&updated).arg(".");
     operations::run_archive_command(command, progress)?;
     progress.check()?;

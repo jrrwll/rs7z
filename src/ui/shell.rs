@@ -2,6 +2,7 @@ use super::Browser;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use rs7z::i18n::trf;
 
 impl Render for Browser {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -33,13 +34,17 @@ impl Render for Browser {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(if self.selection.len() > 0 {
-                        format!("{} of {filtered_count} selected", self.selection.len())
+                        trf(
+                            "%{selected} of %{total} selected",
+                            &[
+                                ("selected", self.selection.len().to_string()),
+                                ("total", filtered_count.to_string()),
+                            ],
+                        )
                     } else {
-                        format!("{filtered_count} items")
+                        trf("%{count} items", &[("count", filtered_count.to_string())])
                     })
-                    .when_some(selected_name, |bar, name| bar.child(format!("  {name}")))
-                    .child(div().flex_1())
-                    .when_some(self.status.clone(), |bar, status| bar.child(status)),
+                    .when_some(selected_name, |bar, name| bar.child(format!("  {name}"))),
             )
     }
 }

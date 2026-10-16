@@ -8,6 +8,7 @@ mod operation_dialog;
 mod progress_dialog;
 mod rename_dialog;
 mod selection;
+mod settings_dialog;
 mod shell;
 mod toolbar;
 
@@ -15,17 +16,20 @@ mod toolbar;
 #[path = "../../tests/support/file_view.rs"]
 mod tests;
 
-use gpui_kit::component::input::InputState;
+use gpui_kit::component::{Root, input::InputState};
 use gpui_kit::*;
+use rs7z::i18n::{self, tr};
 use rs7z::model::archive::ArchiveIndex;
 use rs7z::model::{config::TerminalConfig, file::FileItem};
 use rs7z::service::{config, logging};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 actions!(
     rs7z,
     [
         Quit,
+        OpenSettings,
         AddToArchive,
         ExtractArchive,
         TestArchive,
@@ -45,12 +49,36 @@ fn init_app_actions(cx: &mut App) {
         logging::info("Application quit requested");
         cx.quit();
     });
-    let shortcut = if cfg!(target_os = "macos") {
+    cx.on_action(|_: &OpenSettings, cx| {
+        let Some(window) = cx.active_window() else {
+            return;
+        };
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                let Some(Some(root)) = window.root::<Root>() else {
+                    return;
+                };
+                let Ok(browser) = root.read(cx).view().clone().downcast::<Browser>() else {
+                    return;
+                };
+                browser.update(cx, |browser, cx| browser.open_settings(window, cx));
+            });
+        });
+    });
+    let quit_shortcut = if cfg!(target_os = "macos") {
         "cmd-q"
     } else {
         "ctrl-q"
     };
-    cx.bind_keys([KeyBinding::new(shortcut, Quit, None)]);
+    let settings_shortcut = if cfg!(target_os = "macos") {
+        "cmd-,"
+    } else {
+        "ctrl-,"
+    };
+    cx.bind_keys([
+        KeyBinding::new(quit_shortcut, Quit, None),
+        KeyBinding::new(settings_shortcut, OpenSettings, None),
+    ]);
     // The key labelled Delete on a Mac keyboard produces Backspace.
     #[cfg(target_os = "macos")]
     cx.bind_keys([KeyBinding::new(
@@ -72,7 +100,11 @@ fn init_app_actions(cx: &mut App) {
         KeyBinding::new("secondary-a", SelectAllItems, Some(FILE_LIST_CONTEXT)),
     ]);
     // Native menus capture shortcuts when installed, so bind the action first.
-    cx.set_menus([Menu::new("rs7z").items([MenuItem::action("Quit rs7z", Quit)])]);
+    cx.set_menus([Menu::new("rs7z").items([
+        MenuItem::action(tr("Settings…"), OpenSettings),
+        MenuItem::separator(),
+        MenuItem::action(tr("Quit rs7z"), Quit),
+    ])]);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -85,30 +117,29 @@ enum Operation {
 }
 
 impl Operation {
-    fn label(self) -> &'static str {
-        match self {
+    fn label(self) -> String {
+        tr(match self {
             Self::Add => "Add to archive",
             Self::Extract => "Extract to",
             Self::Test => "Test archive",
             Self::Copy => "Copy to",
             Self::Move => "Move to",
-        }
+        })
     }
 
-    fn confirm_label(self) -> &'static str {
-        match self {
+    fn confirm_label(self) -> String {
+        tr(match self {
             Self::Add => "Add",
             Self::Extract => "Extract",
             Self::Test => "Test",
             Self::Copy => "Copy",
             Self::Move => "Move",
-        }
+        })
     }
 }
 
 struct Browser {
     current_dir: PathBuf,
-    starting_dir: PathBuf,
     files: Vec<FileItem>,
     selection: selection::Selection,
     history: Vec<PathBuf>,
@@ -124,10 +155,14 @@ struct Browser {
     archive: Option<ArchiveIndex>,
     archive_password: Option<String>,
     list_scroll: UniformListScrollHandle,
+    horizontal_scroll: ScrollHandle,
+    column_widths: HashMap<file_view::FileColumn, f32>,
+    resizing_column: Option<file_view::ColumnResize>,
     _subscriptions: Vec<Subscription>,
 }
 
 pub fn run(path: PathBuf) {
+    i18n::initialize();
     match config::verbose_from_env() {
         Ok(verbose) => logging::set_verbose(verbose),
         Err(error) => logging::error(error),
@@ -145,7 +180,7 @@ pub fn run(path: PathBuf) {
                     size(px(1060.), px(660.)),
                     cx,
                 ))),
-                window_min_size: Some(size(px(760.), px(420.))),
+                window_min_size: Some(size(px(820.), px(420.))),
                 ..Default::default()
             };
             gpui_kit::open_window(options, cx, move |window, cx| {

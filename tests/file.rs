@@ -34,6 +34,9 @@ fn file_modified_time_is_available_in_directory_listing() {
         .unwrap();
     let modified = item.modified.unwrap();
     assert_eq!(modified, fs::metadata(&path).unwrap().modified().unwrap());
+    assert_eq!(item.created, fs::metadata(&path).unwrap().created().ok());
+    assert_eq!(item.accessed, fs::metadata(&path).unwrap().accessed().ok());
+    assert!(item.archive.is_none());
     assert_eq!(format_modified(None), "--");
     assert_eq!(format_modified_seconds(None), "--");
     assert_eq!(format_modified(Some(SystemTime::UNIX_EPOCH)).len(), 16);

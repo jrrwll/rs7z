@@ -2,7 +2,7 @@ use rs7z::{
     model::{
         archive::{ArchiveDestination, ArchiveOperation},
         operations::OperationError,
-        zip::{CompressionLevel, ZipOptions},
+        zip::{CompressionLevel, ZipEncryption, ZipOptions},
     },
     service::{archive, operations::ProgressHandle},
 };
@@ -47,6 +47,72 @@ fn apply(path: &Path, operation: ArchiveOperation) {
 }
 
 #[test]
+fn zip_entry_metadata_reaches_browser_items() {
+    let path = Path::new("tests/fixtures/zipx-deflate64.zipx");
+    let index = archive::read(path).unwrap();
+    let item = archive::children(&index, "").unwrap().remove(0);
+    let metadata = item.archive.as_ref().unwrap();
+    assert_eq!(metadata.compressed_size, Some(61));
+    assert_eq!(metadata.encrypted, Some(false));
+    assert_eq!(metadata.crc32, Some(0x8974_9A40));
+    assert_eq!(metadata.comment.as_deref(), Some(""));
+    assert!(item.modified.is_some());
+    assert!(item.created.is_some());
+    assert!(item.accessed.is_some());
+}
+
+#[test]
+fn missing_zip_entry_fields_remain_unknown() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("plain.zip");
+    fixture(&path);
+    let index = archive::read(&path).unwrap();
+    let item = archive::children(&index, "")
+        .unwrap()
+        .into_iter()
+        .find(|item| item.name == "root.txt")
+        .unwrap();
+    let metadata = item.archive.as_ref().unwrap();
+    assert_eq!(metadata.encrypted, Some(false));
+    assert_eq!(metadata.comment.as_deref(), Some(""));
+    assert!(item.created.is_none());
+    assert!(item.accessed.is_none());
+}
+
+#[test]
+fn mixed_zip_reports_encryption_per_entry() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("mixed.zip");
+    let mut zip = ZipWriter::new(File::create(&path).unwrap());
+    zip.start_file(
+        "secret.txt",
+        SimpleFileOptions::default().with_aes_encryption(zip::AesMode::Aes256, "secret"),
+    )
+    .unwrap();
+    zip.write_all(b"private").unwrap();
+    zip.start_file("public.txt", SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(b"public").unwrap();
+    zip.finish().unwrap();
+
+    let index = archive::read(&path).unwrap();
+    assert!(index.encrypted);
+    let files = archive::children(&index, "").unwrap();
+    let encrypted = |name| {
+        files
+            .iter()
+            .find(|item| item.name == name)
+            .unwrap()
+            .archive
+            .as_ref()
+            .unwrap()
+            .encrypted
+    };
+    assert_eq!(encrypted("secret.txt"), Some(true));
+    assert_eq!(encrypted("public.txt"), Some(false));
+}
+
+#[test]
 fn aes_entries_survive_rewrite_and_new_entries_use_selected_options() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("encrypted.zip");
@@ -64,6 +130,7 @@ fn aes_entries_survive_rewrite_and_new_entries_use_selected_options() {
     fs::write(&source, b"new contents").unwrap();
     let mut zip_options = ZipOptions::default();
     zip_options.password = Some("secret".into());
+    zip_options.zip_encryption = ZipEncryption::Aes256;
     zip_options.compression_level = Some(CompressionLevel::Store);
     archive::apply_with_options(
         &path,
@@ -92,7 +159,7 @@ fn aes_entries_survive_rewrite_and_new_entries_use_selected_options() {
 }
 
 #[test]
-fn zipcrypto_archives_are_supported_but_not_selected_for_new_entries() {
+fn zipcrypto_archives_are_supported() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source.txt");
     fs::write(&source, b"legacy encryption").unwrap();
@@ -138,6 +205,46 @@ fn zipcrypto_archives_are_supported_but_not_selected_for_new_entries() {
         .read_to_string(&mut contents)
         .unwrap();
     assert_eq!(contents, "legacy encryption");
+}
+
+#[test]
+fn new_zip_uses_zipcrypt_by_default_and_supports_aes256() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("secret.txt");
+    fs::write(&source, b"secret contents").unwrap();
+
+    for (name, method) in [
+        ("default.zip", ZipEncryption::ZipCrypt),
+        ("aes.zip", ZipEncryption::Aes256),
+    ] {
+        let path = root.path().join(name);
+        let mut options = ZipOptions::default();
+        options.password = Some("password".into());
+        if method == ZipEncryption::Aes256 {
+            options.zip_encryption = method;
+        }
+        rs7z::service::operations::add_many_with_options(
+            std::slice::from_ref(&source),
+            &path,
+            &options,
+            &ProgressHandle::default(),
+        )
+        .unwrap();
+
+        let mut archive = ZipArchive::new(File::open(path).unwrap()).unwrap();
+        let aes = archive
+            .get_aes_verification_key_and_salt(0)
+            .unwrap()
+            .is_some();
+        assert_eq!(aes, method == ZipEncryption::Aes256);
+        let mut contents = String::new();
+        archive
+            .by_name_decrypt("secret.txt", b"password")
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        assert_eq!(contents, "secret contents");
+    }
 }
 
 #[test]

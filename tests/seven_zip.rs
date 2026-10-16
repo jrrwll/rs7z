@@ -2,6 +2,7 @@ use rs7z::{
     model::{
         archive::{
             ArchiveDestination, ArchiveFormat, ArchiveOperation, ArchiveOptions, CompressionLevel,
+            SevenZipMethod, SolidBlockSize,
         },
         operations::OperationError,
     },
@@ -59,6 +60,119 @@ fn volume_sizes_are_optional_positive_and_cannot_inject_options() {
         "999999999999999999999999",
     ] {
         assert!(parse_volume_size(input).is_err(), "accepted {input}");
+    }
+}
+
+#[test]
+fn seven_zip_methods_and_sizes_create_extractable_archives() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("item.txt");
+    fs::write(&source, b"seven zip settings").unwrap();
+    for (name, method, listing_name, word) in [
+        ("lzma2", SevenZipMethod::Lzma2, "LZMA2", Some(32)),
+        ("lzma", SevenZipMethod::Lzma, "LZMA", Some(32)),
+        ("ppmd", SevenZipMethod::Ppmd, "PPMD", Some(16)),
+        ("bzip2", SevenZipMethod::Bzip2, "BZip2", None),
+    ] {
+        let path = root.path().join(format!("{name}.7z"));
+        let mut options = ArchiveOptions::default();
+        options.seven_zip.method = Some(method);
+        if method != SevenZipMethod::Bzip2 {
+            options.seven_zip.dictionary_size = Some(16 * 1024 * 1024);
+            options.seven_zip.word_size = word;
+        }
+        options.seven_zip.solid_block_size = Some(if method == SevenZipMethod::Bzip2 {
+            SolidBlockSize::Size(4 * 1024 * 1024 * 1024)
+        } else {
+            SolidBlockSize::NonSolid
+        });
+        create(&source, &path, &options);
+        let listing = rs7z::service::seven_zip_cli::command()
+            .unwrap()
+            .args(["l", "-slt", "--"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(listing.status.success());
+        let listing = String::from_utf8_lossy(&listing.stdout);
+        assert!(
+            listing.contains(&format!("Method = {listing_name}")),
+            "{listing}"
+        );
+        operations::test_archive_with_progress(&path, &ProgressHandle::default()).unwrap();
+        let output = root.path().join(format!("out-{name}"));
+        operations::extract_with_progress(&path, &output, &ProgressHandle::default()).unwrap();
+        assert_eq!(
+            fs::read(output.join("item.txt")).unwrap(),
+            b"seven zip settings"
+        );
+    }
+}
+
+#[test]
+fn seven_zip_rejects_incompatible_method_options() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("item.txt");
+    fs::write(&source, b"contents").unwrap();
+    let path = root.path().join("archive.7z");
+    let mut options = ArchiveOptions::default();
+    options.seven_zip.method = Some(SevenZipMethod::Bzip2);
+    options.seven_zip.dictionary_size = Some(16 * 1024 * 1024);
+    assert!(
+        operations::add_many_with_options(
+            std::slice::from_ref(&source),
+            &path,
+            &options,
+            &ProgressHandle::default()
+        )
+        .is_err()
+    );
+    options.seven_zip.method = Some(SevenZipMethod::Ppmd);
+    options.seven_zip.word_size = Some(64);
+    assert!(
+        operations::add_many_with_options(
+            std::slice::from_ref(&source),
+            &path,
+            &options,
+            &ProgressHandle::default()
+        )
+        .is_err()
+    );
+    assert!(!path.exists());
+}
+
+#[test]
+fn seven_zip_solid_options_control_block_layout() {
+    let root = tempfile::tempdir().unwrap();
+    let sources = [
+        root.path().join("first.txt"),
+        root.path().join("second.txt"),
+    ];
+    fs::write(&sources[0], b"first file").unwrap();
+    fs::write(&sources[1], b"second file").unwrap();
+    for (name, block, expected) in [
+        ("non-solid", SolidBlockSize::NonSolid, "Solid = -"),
+        ("solid", SolidBlockSize::Solid, "Solid = +"),
+        (
+            "one-megabyte",
+            SolidBlockSize::Size(1024 * 1024),
+            "Solid = +",
+        ),
+    ] {
+        let path = root.path().join(format!("{name}.7z"));
+        let mut options = ArchiveOptions::default();
+        options.seven_zip.solid_block_size = Some(block);
+        operations::add_many_with_options(&sources, &path, &options, &ProgressHandle::default())
+            .unwrap();
+        let listing = rs7z::service::seven_zip_cli::command()
+            .unwrap()
+            .args(["l", "-slt", "--"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(listing.status.success());
+        let listing = String::from_utf8_lossy(&listing.stdout);
+        assert!(listing.contains(expected), "{listing}");
     }
 }
 
@@ -387,7 +501,7 @@ fn split_compression_reports_intermediate_progress_before_completion() {
     let worker = thread::spawn(move || {
         let mut options = ArchiveOptions::default();
         options.volume_size = Some(1024 * 1024);
-        options.compression_level = Some(CompressionLevel::Standard);
+        options.compression_level = Some(CompressionLevel::Normal);
         operations::add_many_with_options(&[source], &path, &options, &worker_progress)
     });
     let deadline = Instant::now() + Duration::from_secs(30);

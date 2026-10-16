@@ -13,6 +13,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use rs7z::i18n::{tr, trf};
 use rs7z::{
     model::archive::{ArchiveDestination, ArchiveIndex, ArchiveOperation},
     model::file::FileKind,
@@ -84,7 +85,7 @@ impl ArchiveDialog {
         let directory_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(format!("/{current}"))
-                .placeholder("/folder/new folder")
+                .placeholder(tr("/folder/new folder"))
         });
         let folder_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -95,9 +96,9 @@ impl ArchiveDialog {
                         .display()
                         .to_string(),
                 )
-                .placeholder("Destination folder path")
+                .placeholder(tr("Destination folder path"))
         });
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.subscribe(&folder_input, |this, _, event, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.error = None;
@@ -136,8 +137,34 @@ impl ArchiveDialog {
             ),
         ];
         let archive_settings = super::archive_settings::ArchiveSettings::new(window, cx);
+        subscriptions.push(cx.subscribe_in(
+            archive_settings.method_select(),
+            window,
+            |this, _, event, window, cx| {
+                if matches!(event, SelectEvent::Confirm(Some(_))) {
+                    this.archive_settings.sync_method(window, cx);
+                    cx.notify();
+                }
+            },
+        ));
+        subscriptions.push(cx.subscribe(
+            archive_settings.compression_select(),
+            |_, _, event, cx| {
+                if matches!(event, SelectEvent::Confirm(Some(_))) {
+                    cx.notify();
+                }
+            },
+        ));
         if let Some(password) = &state.archive_password {
             archive_settings.set_password(password, window, cx);
+        }
+        for input in archive_settings.password_inputs() {
+            subscriptions.push(cx.subscribe(input, |this, _, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.error = None;
+                    cx.notify();
+                }
+            }));
         }
         Self {
             operation,
@@ -167,6 +194,18 @@ impl ArchiveDialog {
             input.set_selected_range(end..end, cx);
             input.focus(window, cx);
         });
+    }
+
+    pub(super) fn can_confirm(&self, cx: &App) -> bool {
+        !self.picking
+            && self
+                .archive_settings
+                .password_error(
+                    matches!(self.operation, Operation::Add),
+                    self.archive.format,
+                    cx,
+                )
+                .is_none()
     }
 
     fn system_folder(&self, cx: &App) -> PathBuf {
@@ -211,17 +250,20 @@ impl ArchiveDialog {
             let picker = rfd::AsyncFileDialog::new().set_directory(directory);
             let picked = if destination {
                 picker
-                    .set_title("Choose destination folder")
+                    .set_title(tr("Choose destination folder"))
                     .pick_folder()
                     .await
                     .map(|path| vec![path])
             } else if folders {
                 picker
-                    .set_title("Add folders to archive")
+                    .set_title(tr("Add folders to archive"))
                     .pick_folders()
                     .await
             } else {
-                picker.set_title("Add files to archive").pick_files().await
+                picker
+                    .set_title(tr("Add files to archive"))
+                    .pick_files()
+                    .await
             };
             view.update_in(cx, |this, window, cx| {
                 this.picking = false;
@@ -258,7 +300,10 @@ impl ArchiveDialog {
         if self.archive.read_only
             && !(matches!(self.operation, Operation::Copy) && self.system_destination)
         {
-            return self.invalid("This archive supports copying to a system folder only.", cx);
+            return self.invalid(
+                &tr("This archive supports copying to a system folder only."),
+                cx,
+            );
         }
         let directory = self.directory_input.read(cx).value().to_string();
         if !self.system_destination
@@ -268,7 +313,7 @@ impl ArchiveDialog {
         }
         let operation = if matches!(self.operation, Operation::Add) {
             if self.sources.is_empty() {
-                return self.invalid("Choose files or folders to add.", cx);
+                return self.invalid(&tr("Choose files or folders to add."), cx);
             }
             ArchiveOperation::Add {
                 sources: self.sources.clone(),
@@ -276,16 +321,16 @@ impl ArchiveDialog {
             }
         } else {
             if self.entries.is_empty() {
-                return self.invalid("Select archive entries first.", cx);
+                return self.invalid(&tr("Select archive entries first."), cx);
             }
             let destination = if self.system_destination {
                 let folder = self.folder_input.read(cx).value().to_string();
                 if folder.is_empty() {
-                    return self.invalid("Enter or choose a destination folder.", cx);
+                    return self.invalid(&tr("Enter or choose a destination folder."), cx);
                 }
                 let folder = self.system_folder(cx);
                 if !folder.is_dir() {
-                    return self.invalid("Choose an existing destination folder.", cx);
+                    return self.invalid(&tr("Choose an existing destination folder."), cx);
                 }
                 ArchiveDestination::FileSystem(folder)
             } else {
@@ -298,6 +343,14 @@ impl ArchiveDialog {
             }
         };
         let archive = self.archive.path.clone();
+        if let Err(error) = self.archive_settings.validate_password(
+            matches!(self.operation, Operation::Add),
+            self.archive.format,
+            cx,
+        ) {
+            self.archive_settings.focus_confirmation(window, cx);
+            return self.invalid(&error, cx);
+        }
         let options = self
             .archive_settings
             .options_for_format(self.archive.format, cx);
@@ -347,14 +400,14 @@ impl Render for ArchiveDialog {
                         div()
                             .text_sm()
                             .font_semibold()
-                            .child(format!("Sources ({})", items.len())),
+                            .child(trf("Sources (%{count})", &[("count", items.len().to_string())])),
                     )
                     .child(
                         v_flex()
                             .id("archive-sources")
                             .max_h(rems(8.))
                             .overflow_y_scrollbar()
-                            .when(items.is_empty(), |list| list.child("No sources selected"))
+                            .when(items.is_empty(), |list| list.child(tr("No sources selected")))
                             .children(items.into_iter().map(|name| div().text_sm().child(name))),
                     )
                     .when(adding, |section| {
@@ -365,7 +418,7 @@ impl Render for ArchiveDialog {
                                     Button::new("archive-add-files")
                                         .small()
                                         .outline()
-                                        .label("Add files…")
+                                        .label(tr("Add files…"))
                                         .disabled(self.picking)
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.pick(false, false, window, cx)
@@ -375,7 +428,7 @@ impl Render for ArchiveDialog {
                                     Button::new("archive-add-folders")
                                         .small()
                                         .outline()
-                                        .label("Add folders…")
+                                        .label(tr("Add folders…"))
                                         .disabled(self.picking)
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.pick(true, false, window, cx)
@@ -385,7 +438,7 @@ impl Render for ArchiveDialog {
                                     Button::new("archive-clear-sources")
                                         .small()
                                         .ghost()
-                                        .label("Clear")
+                                        .label(tr("Clear"))
                                         .disabled(self.picking)
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.sources.clear();
@@ -398,14 +451,14 @@ impl Render for ArchiveDialog {
             .child(
                 v_flex()
                     .gap_2()
-                    .child(div().text_sm().font_semibold().child("Destination"))
+                    .child(div().text_sm().font_semibold().child(tr("Destination")))
                     .when(!adding, |section| {
                         section.child(
                             RadioGroup::new("archive-destination-kind")
                                 .selected_index(Some(usize::from(self.system_destination)))
                                 .disabled(self.archive.read_only)
-                                .child(Radio::new("archive-target").label("This archive").disabled(self.archive.read_only))
-                                .child(Radio::new("filesystem-target").label("System folder"))
+                                .child(Radio::new("archive-target").label(tr("This archive")).disabled(self.archive.read_only))
+                                .child(Radio::new("filesystem-target").label(tr("System folder")))
                                 .on_change(cx.listener(|this, index, window, cx| {
                                     this.system_destination = *index == 1 || this.archive.read_only;
                                     this.error = None;
@@ -424,42 +477,45 @@ impl Render for ArchiveDialog {
                                     .id("archive-directory-path")
                                     .small(),
                             )
-                            .child(div().text_xs().child("Or choose an existing directory"))
+                            .child(div().text_xs().child(tr("Or choose an existing directory")))
                             .child(
                                 Select::new(&self.directory)
                                     .id("archive-directory")
-                                    .accessibility_label("Directory inside archive")
-                                    .placeholder("Choose an existing directory")
+                                    .accessibility_label(tr("Directory inside archive"))
+                                    .placeholder(tr("Choose an existing directory"))
                                     .small(),
                             )
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Paths start at / (archive root). Missing directories are created."),
+                                    .child(tr("Paths start at / (archive root). Missing directories are created.")),
                             )
                     })
                     .when(self.system_destination, |section| {
-                        section
+                        section.child(h_flex().gap_2()
                             .child(
-                                Input::new(&self.folder_input).id("archive-system-path").small(),
+                                div().flex_1().min_w_0().child(
+                                    Input::new(&self.folder_input).id("archive-system-path").small(),
+                                ),
                             )
                             .child(
                                 Button::new("archive-system-folder")
                                     .small()
                                     .outline()
-                                    .label("Choose folder…")
+                                    .flex_none()
+                                    .label(tr("Choose folder…"))
                                     .disabled(self.picking)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.pick(true, true, window, cx)
                                     })),
-                            )
+                            ))
                     }),
             )
             .child(self.archive_settings.render(adding, self.archive.format, cx))
             .when(self.archive.read_only, |body| {
                 body.child(div().text_xs().text_color(cx.theme().muted_foreground)
-                    .child("This archive supports browsing and copying to a system folder. Extract to edit its contents."))
+                    .child(tr("This archive supports browsing and copying to a system folder. Extract to edit its contents.")))
             })
             .when_some(self.error.clone(), |body, error| {
                 body.child(div().text_sm().text_color(cx.theme().danger).child(error))

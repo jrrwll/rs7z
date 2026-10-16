@@ -1,6 +1,6 @@
 use super::{ArchiveBackend, build_index, seven_zip};
 use crate::model::archive::{
-    ArchiveDestination, ArchiveFormat, ArchiveIndex, ArchiveOperation, ArchiveOptions,
+    ArchiveDestination, ArchiveFormat, ArchiveIndex, ArchiveOperation, ArchiveOptions, TarFormat,
 };
 use crate::model::operations::OperationError;
 use crate::service::{
@@ -11,7 +11,7 @@ use crate::service::{
 use std::{
     fs::{self, File},
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{Command, Stdio},
     thread,
     time::Duration,
 };
@@ -25,7 +25,7 @@ fn failed(error: impl std::fmt::Display) -> OperationError {
 fn format(path: &Path) -> Result<ArchiveFormat, OperationError> {
     super::format(path)
         .filter(|format| super::is_tar(*format))
-        .ok_or_else(|| failed("Choose a supported compressed TAR archive."))
+        .ok_or_else(|| failed("Choose a supported TAR archive."))
 }
 
 fn codec(format: ArchiveFormat) -> &'static str {
@@ -46,6 +46,9 @@ fn validate_options(options: &ArchiveOptions) -> Result<(), OperationError> {
         return Err(failed(
             "Volume size is supported only for new ZIP or 7z archives.",
         ));
+    }
+    if options.seven_zip != Default::default() {
+        return Err(failed("7z compression settings require a 7z archive."));
     }
     Ok(())
 }
@@ -97,6 +100,9 @@ fn unpack_layer(
     progress.check()?;
     let tar = stage.join("contents.tar");
     let format = format(path)?;
+    if format == ArchiveFormat::Tar {
+        return Ok(path.to_path_buf());
+    }
     if matches!(format, ArchiveFormat::TarLzma | ArchiveFormat::TarZstd) {
         super::compression::decode(path, &tar, format, progress)?;
         return Ok(tar);
@@ -118,6 +124,7 @@ fn unpack_layer(
 fn read_tar(
     path: &Path,
     tar: &Path,
+    stage: &Path,
     progress: &ProgressHandle,
 ) -> Result<ArchiveIndex, OperationError> {
     progress.check()?;
@@ -128,8 +135,8 @@ fn read_tar(
         zip::command_description(&command)
     ));
     // File-backed metadata avoids full pipes while keeping cancellation responsive.
-    let listing = tar.with_extension("listing");
-    let errors = tar.with_extension("errors");
+    let listing = stage.join("contents.listing");
+    let errors = stage.join("contents.errors");
     let mut child = command
         .stdin(Stdio::null())
         .stdout(File::create(&listing).map_err(failed)?)
@@ -186,6 +193,51 @@ fn extract_tar(
     operations::run_archive_command(command, progress)
 }
 
+fn pack_posix_tar(
+    contents: &Path,
+    tar: &Path,
+    progress: &ProgressHandle,
+) -> Result<(), OperationError> {
+    progress.check()?;
+    let errors = tar.with_extension("errors");
+    let mut child = Command::new("tar")
+        .current_dir(contents)
+        .env_remove("TAR_OPTIONS")
+        .args(["-c", "--format=pax", "-f"])
+        .arg(tar)
+        .arg(".")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(File::create(&errors).map_err(failed)?)
+        .spawn()
+        .map_err(|error| failed(format!("Cannot start system tar for POSIX format: {error}")))?;
+    let status = loop {
+        if progress.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(OperationError::Cancelled);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => thread::sleep(Duration::from_millis(40)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(failed(error));
+            }
+        }
+    };
+    progress.check()?;
+    if !status.success() {
+        return Err(failed(format!(
+            "Cannot create POSIX TAR archive: {}",
+            fs::read_to_string(errors).map_err(failed)?.trim()
+        )));
+    }
+    progress.update(100., "Packed POSIX TAR");
+    Ok(())
+}
+
 fn pack(
     contents: &Path,
     stage: &Path,
@@ -200,13 +252,20 @@ fn pack(
     }
     super::compression::require_tool(format)?;
     let tar = stage.join("updated.tar");
-    let mut command = crate::service::seven_zip_cli::command()?;
-    command
-        .current_dir(contents)
-        .args(["a", "-ttar", "-y", "-spd", "--"])
-        .arg(&tar)
-        .arg(".");
-    operations::run_archive_command(command, &progress.phase(0., 35.))?;
+    if options.tar_format == TarFormat::Posix {
+        pack_posix_tar(contents, &tar, &progress.phase(0., 35.))?;
+    } else {
+        let mut command = crate::service::seven_zip_cli::command()?;
+        command
+            .current_dir(contents)
+            .args(["a", "-ttar", "-y", "-spd", "--"])
+            .arg(&tar)
+            .arg(".");
+        operations::run_archive_command(command, &progress.phase(0., 35.))?;
+    }
+    if format == ArchiveFormat::Tar {
+        return Ok(tar);
+    }
     let updated = stage.join(format!("updated.{}", super::extension(format)));
     if matches!(format, ArchiveFormat::TarLzma | ArchiveFormat::TarZstd) {
         super::compression::encode(&tar, &updated, format, options, &progress.phase(35., 100.))?;
@@ -272,7 +331,7 @@ impl ArchiveBackend for TarBackend {
         let progress = ProgressHandle::default();
         workspace(None, &progress, |stage| {
             let tar = unpack_layer(path, stage, &progress)?;
-            read_tar(path, &tar, &progress)
+            read_tar(path, &tar, stage, &progress)
         })
         .map_err(|error| match error {
             OperationError::Failed(error) => error,
@@ -316,7 +375,7 @@ impl ArchiveBackend for TarBackend {
             progress,
             |stage| {
                 let tar = unpack_layer(&path, stage, &progress.phase(0., 15.))?;
-                let index = read_tar(&path, &tar, progress)?;
+                let index = read_tar(&path, &tar, stage, progress)?;
                 progress.check()?;
                 seven_zip::validate_operation(&index, operation)?;
                 let contents = stage.join("contents");
@@ -389,7 +448,7 @@ pub(in crate::service) fn extract(
     validate_options(options)?;
     workspace(None, progress, |stage| {
         let tar = unpack_layer(path, stage, &progress.phase(0., 35.))?;
-        let index = read_tar(path, &tar, progress)?;
+        let index = read_tar(path, &tar, stage, progress)?;
         operations::extract_tar_with_index(&tar, destination, index, &progress.phase(35., 100.))
     })
 }
@@ -403,7 +462,7 @@ pub(in crate::service) fn test(
     workspace(None, progress, |stage| {
         // Decompression validates the outer checksum before testing the inner TAR.
         let tar = unpack_layer(path, stage, &progress.phase(0., 70.))?;
-        read_tar(path, &tar, progress)?;
+        read_tar(path, &tar, stage, progress)?;
         let mut command = crate::service::seven_zip_cli::command()?;
         command.args(["t", "-ttar", "--"]).arg(tar);
         operations::run_archive_command(command, &progress.phase(70., 100.))

@@ -93,13 +93,21 @@ mod tests {
     #[test]
     fn only_existing_directories_and_browsable_archive_files_are_accepted() {
         let root = tempfile::tempdir().unwrap();
-        for name in ["a.zip", "a.7z", "a.tgz", "a.tar.Z", "a.zip.001", "a.7z.001"] {
+        for name in [
+            "a.zip",
+            "a.7z",
+            "a.tar",
+            "a.tgz",
+            "a.tar.Z",
+            "a.zip.001",
+            "a.7z.001",
+        ] {
             fs::write(root.path().join(name), b"fixture").unwrap();
             assert!(path([OsString::from(name)], root.path(), None).is_ok());
         }
         for name in [
             "a.txt", "a.rar", "a.gz", "a.bz2", "a.xz", "a.zstd", "a.lzma", "a.Z", "a.lzma86",
-            "a.b64", "a.tar", "missing",
+            "a.b64", "missing",
         ] {
             if name != "missing" {
                 fs::write(root.path().join(name), b"fixture").unwrap();

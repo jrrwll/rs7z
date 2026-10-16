@@ -2,7 +2,12 @@ use super::{Browser, Operation};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt as _;
 use gpui_kit::component::button::Button;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::group_box::{GroupBox, GroupBoxVariants as _};
+use gpui_kit::component::input::{
+    Input, InputEvent, InputGroup, InputGroupAddon, InputGroupAddonAlignment, InputGroupButton,
+    InputState,
+};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IndexPath, Sizable as _, h_flex, v_flex,
@@ -14,6 +19,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rfd::AsyncFileDialog;
+use rs7z::i18n::{tr, trf};
 use rs7z::service::operations::validate_item_name;
 use rs7z::{
     model::archive::ArchiveFormat,
@@ -31,11 +37,24 @@ enum PickTarget {
 const FORMATS: &[(&str, ArchiveFormat)] = &[
     ("ZIP", ArchiveFormat::Zip),
     ("7z", ArchiveFormat::SevenZip),
+    ("tar", ArchiveFormat::Tar),
     ("tar.gz", ArchiveFormat::TarGzip),
     ("tar.bz2", ArchiveFormat::TarBzip2),
     ("tar.xz", ArchiveFormat::TarXz),
     ("tar.lzma", ArchiveFormat::TarLzma),
     ("tar.zst", ArchiveFormat::TarZstd),
+];
+
+const VOLUME_SIZES: [(&str, &str); 9] = [
+    ("10M", "10M"),
+    ("100M", "100M"),
+    ("1000M", "1000M"),
+    ("650M - CD", "650M"),
+    ("700M - CD", "700M"),
+    ("4092M - FAT", "4092M"),
+    ("4480M - DVD", "4480M"),
+    ("8128M - DVD DL", "8128M"),
+    ("23040M - BD", "23040M"),
 ];
 
 pub(super) struct OperationDialog {
@@ -92,7 +111,7 @@ impl OperationDialog {
             )
         });
         let volume_size =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Optional, e.g. 100M or 1G"));
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr("Optional, e.g. 100M or 1G")));
         let format_subscription =
             cx.subscribe_in(&format, window, |this: &mut Self, _, event, window, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
@@ -112,7 +131,7 @@ impl OperationDialog {
         let destination_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(destination_text(operation, destination.as_deref()))
-                .placeholder("Destination folder path")
+                .placeholder(tr("Destination folder path"))
         });
         let subscription = cx.subscribe(&destination_input, |this, input, event, cx| {
             if matches!(event, InputEvent::Change) {
@@ -124,6 +143,31 @@ impl OperationDialog {
                 cx.notify();
             }
         });
+        let archive_settings = super::archive_settings::ArchiveSettings::new(window, cx);
+        let method_subscription = cx.subscribe_in(
+            archive_settings.method_select(),
+            window,
+            |this, _, event, window, cx| {
+                if matches!(event, SelectEvent::Confirm(Some(_))) {
+                    this.archive_settings.sync_method(window, cx);
+                    cx.notify();
+                }
+            },
+        );
+        let compression_subscription =
+            cx.subscribe(archive_settings.compression_select(), |_, _, event, cx| {
+                if matches!(event, SelectEvent::Confirm(Some(_))) {
+                    cx.notify();
+                }
+            });
+        let password_subscriptions = archive_settings.password_inputs().map(|input| {
+            cx.subscribe(input, |this, _, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.error = None;
+                    cx.notify();
+                }
+            })
+        });
         Self {
             operation,
             sources,
@@ -133,13 +177,33 @@ impl OperationDialog {
             name,
             format,
             volume_size,
-            archive_settings: super::archive_settings::ArchiveSettings::new(window, cx),
+            archive_settings,
             current_dir,
             browser,
             picking: false,
             error: None,
-            _subscriptions: vec![subscription, format_subscription],
+            _subscriptions: vec![
+                subscription,
+                format_subscription,
+                method_subscription,
+                compression_subscription,
+            ]
+            .into_iter()
+            .chain(password_subscriptions)
+            .collect(),
         }
+    }
+
+    pub(super) fn can_confirm(&self, cx: &App) -> bool {
+        !self.picking
+            && self
+                .archive_settings
+                .password_error(
+                    matches!(self.operation, Operation::Add),
+                    self.archive_format(cx),
+                    cx,
+                )
+                .is_none()
     }
 
     pub(super) fn focus_extract_destination(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -189,36 +253,39 @@ impl OperationDialog {
             let picked = match target {
                 PickTarget::SourceFile => {
                     let picker = if matches!(operation, Operation::Extract | Operation::Test) {
-                        picker.add_filter("Archives", archive::OPEN_EXTENSIONS)
+                        picker.add_filter(tr("Archives"), archive::OPEN_EXTENSIONS)
                     } else {
                         picker
                     };
                     if matches!(operation, Operation::Extract | Operation::Test) {
                         picker
-                            .set_title("Choose archive")
+                            .set_title(tr("Choose archive"))
                             .pick_file()
                             .await
                             .map(|file| vec![file])
                     } else {
-                        picker.set_title("Choose source files").pick_files().await
+                        picker
+                            .set_title(tr("Choose source files"))
+                            .pick_files()
+                            .await
                     }
                 }
                 PickTarget::SourceFolder => {
                     picker
-                        .set_title("Choose source folders")
+                        .set_title(tr("Choose source folders"))
                         .pick_folders()
                         .await
                 }
                 PickTarget::Destination => match operation {
                     Operation::Add => picker
-                        .set_title("Choose archive path")
+                        .set_title(tr("Choose archive path"))
                         .set_file_name(suggested_name.unwrap_or_else(|| "archive.zip".into()))
-                        .add_filter("Archives", archive::SAVE_EXTENSIONS)
+                        .add_filter(tr("Archives"), archive::SAVE_EXTENSIONS)
                         .save_file()
                         .await
                         .map(|file| vec![file]),
                     Operation::Extract | Operation::Copy | Operation::Move => picker
-                        .set_title("Choose destination folder")
+                        .set_title(tr("Choose destination folder"))
                         .pick_folder()
                         .await
                         .map(|folder| vec![folder]),
@@ -316,12 +383,12 @@ impl OperationDialog {
             return false;
         }
         if self.sources.is_empty() {
-            self.error = Some("Choose a source file or folder.".into());
+            self.error = Some(tr("Choose a source file or folder."));
             cx.notify();
             return false;
         }
         if self.sources.iter().any(|source| !source.exists()) {
-            self.error = Some("The selected source no longer exists.".into());
+            self.error = Some(tr("The selected source no longer exists."));
             cx.notify();
             return false;
         }
@@ -351,13 +418,13 @@ impl OperationDialog {
                 self.destination.clone()
             };
             let Some(mut destination) = destination else {
-                self.error = Some("Choose a destination.".into());
+                self.error = Some(tr("Choose a destination."));
                 cx.notify();
                 return false;
             };
             if matches!(self.operation, Operation::Add) {
                 if !destination.is_dir() {
-                    self.error = Some("Enter or choose an existing folder in Save in.".into());
+                    self.error = Some(tr("Enter or choose an existing folder in Save in."));
                     cx.notify();
                     return false;
                 }
@@ -378,7 +445,7 @@ impl OperationDialog {
                     Some(Component::Normal(_))
                 ) || Path::new(&name).components().count() != 1
                 {
-                    self.error = Some("Enter a single file or folder name.".into());
+                    self.error = Some(tr("Enter a single file or folder name."));
                     cx.notify();
                     return false;
                 }
@@ -397,7 +464,7 @@ impl OperationDialog {
             }
             let valid_parent = destination.parent().is_some_and(Path::is_dir);
             if matches!(self.operation, Operation::Add) && !valid_parent {
-                self.error = Some("Choose an archive path in an existing folder.".into());
+                self.error = Some(tr("Choose an archive path in an existing folder."));
                 cx.notify();
                 return false;
             }
@@ -410,7 +477,7 @@ impl OperationDialog {
                             .find(|path| path.exists())
                             .is_some_and(Path::is_dir)))
             {
-                self.error = Some("Choose a destination folder.".into());
+                self.error = Some(tr("Choose a destination folder."));
                 cx.notify();
                 return false;
             }
@@ -436,7 +503,7 @@ impl OperationDialog {
             if matches!(self.operation, Operation::Copy | Operation::Move) && self.sources.len() > 1
             {
                 if !destination.is_dir() {
-                    self.error = Some("Choose an existing destination folder.".into());
+                    self.error = Some(tr("Choose an existing destination folder."));
                     cx.notify();
                     return false;
                 }
@@ -457,12 +524,12 @@ impl OperationDialog {
                 && self.sources.len() == 1
                 && (!valid_parent || destination.exists())
             {
-                self.error = Some("Choose an unused name in an existing folder.".into());
+                self.error = Some(tr("Choose an unused name in an existing folder."));
                 cx.notify();
                 return false;
             }
             if self.sources.iter().any(|source| source == &destination) {
-                self.error = Some("Source and destination must differ.".into());
+                self.error = Some(tr("Source and destination must differ."));
                 cx.notify();
                 return false;
             }
@@ -470,6 +537,16 @@ impl OperationDialog {
         };
         let operation = self.operation;
         let sources = self.sources.clone();
+        if let Err(error) = self.archive_settings.validate_password(
+            matches!(operation, Operation::Add),
+            self.archive_format(cx),
+            cx,
+        ) {
+            self.error = Some(error);
+            self.archive_settings.focus_confirmation(window, cx);
+            cx.notify();
+            return false;
+        }
         let mut options = self
             .archive_settings
             .options_for_format(self.archive_format(cx), cx);
@@ -521,6 +598,153 @@ impl OperationDialog {
             })
             .unwrap_or(ArchiveFormat::Zip)
     }
+
+    fn render_creation(&self, cx: &Context<Self>) -> impl IntoElement {
+        let format = self.archive_format(cx);
+        let destination = v_flex()
+            .gap_2()
+            .child(div().text_sm().font_semibold().child(tr("Save in")))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Input::new(&self.destination_input)
+                                .id("add-destination")
+                                .aria_label(tr("Save in"))
+                                .small(),
+                        ),
+                    )
+                    .child(
+                        Button::new("choose-destination")
+                            .small()
+                            .outline()
+                            .flex_none()
+                            .icon(IconName::FolderOpen)
+                            .label(tr("Choose archive…"))
+                            .disabled(self.picking)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.pick(PickTarget::Destination, window, cx)
+                            })),
+                    ),
+            )
+            .child(
+                div().text_xs().text_color(cx.theme().muted_foreground).child(tr(
+                    "Enter a path or choose a folder. Relative paths start from the current folder.",
+                )),
+            );
+        let identity = h_flex()
+            .gap_4()
+            .items_start()
+            .child(
+                v_flex()
+                    .gap_2()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().text_sm().font_semibold().child(tr("Archive name")))
+                    .child(
+                        Input::new(&self.name)
+                            .id("operation-name")
+                            .aria_label(tr("Archive name"))
+                            .small(),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .w_48()
+                    .flex_none()
+                    .child(div().text_sm().font_semibold().child(tr("Archive format")))
+                    .child(
+                        Select::new(&self.format)
+                            .id("archive-format")
+                            .accessibility_label(tr("Archive format"))
+                            .small(),
+                    ),
+            );
+        let compression = GroupBox::new()
+            .id("archive-compression-settings")
+            .title(tr("Compression"))
+            .outline()
+            .flex_1()
+            .min_w_0()
+            .child(
+                self.archive_settings.render_compression(
+                    format,
+                    matches!(format, ArchiveFormat::Zip | ArchiveFormat::SevenZip)
+                        .then(|| self.render_volume_size(format, cx).into_any_element()),
+                    cx,
+                ),
+            );
+        let encryption = GroupBox::new()
+            .id("archive-encryption-settings")
+            .title(tr("Encryption"))
+            .outline()
+            .flex_1()
+            .min_w_0()
+            .when(archive::supports_password(format), |section| {
+                section.child(self.archive_settings.render_encryption(true, format, cx))
+            })
+            .when(!archive::supports_password(format), |section| {
+                section.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tr("Encryption is not supported for this format.")),
+                )
+            });
+        v_flex()
+            .gap_4()
+            .min_w_0()
+            .child(destination)
+            .child(identity)
+            .child(
+                h_flex()
+                    .gap_4()
+                    .items_start()
+                    .child(compression)
+                    .child(encryption),
+            )
+    }
+
+    fn render_volume_size(&self, format: ArchiveFormat, cx: &App) -> impl IntoElement {
+        let presets = InputGroupButton::new("archive-volume-size-presets")
+            .icon(IconName::ChevronDown)
+            .accessibility_label(tr("Choose volume size"))
+            .tooltip(tr("Choose volume size"))
+            .dropdown_menu({
+                let input = self.volume_size.clone();
+                move |menu, _, _| {
+                    VOLUME_SIZES.into_iter().fold(menu, |menu, (label, size)| {
+                        let input = input.clone();
+                        menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                            input.update(cx, |input, cx| input.set_value(size, window, cx));
+                        }))
+                    })
+                }
+            });
+        v_flex()
+            .gap_2()
+            .child(div().text_sm().font_semibold().child(tr("Volume size (optional)")))
+            .child(
+                InputGroup::new("archive-volume-size-group")
+                    .small()
+                    .input(Input::new(&self.volume_size).id("archive-volume-size"))
+                    .addon(
+                        InputGroupAddon::new("archive-volume-size-options")
+                            .align(InputGroupAddonAlignment::InlineEnd)
+                            .child(presets),
+                    ),
+            )
+            .child(
+                div().text_xs().text_color(cx.theme().muted_foreground)
+                    .child(tr(if format == ArchiveFormat::Zip {
+                        "B, K, M, G units; leave empty for one archive. Use a .zip name; open the resulting .zip.001 file."
+                    } else {
+                        "B, K, M, G units; leave empty for one archive. Open the resulting .7z.001 file."
+                    })),
+            )
+    }
 }
 
 impl Render for OperationDialog {
@@ -547,7 +771,7 @@ impl Render for OperationDialog {
                     path.display().to_string()
                 }
             })
-            .unwrap_or_else(|| "No destination selected".into());
+            .unwrap_or_else(|| tr("No destination selected"));
         let stream_name = matches!(self.operation, Operation::Extract)
             .then(|| {
                 self.sources
@@ -566,9 +790,9 @@ impl Render for OperationDialog {
                             .text_sm()
                             .font_semibold()
                             .child(if self.sources.is_empty() {
-                                "Source".into()
+                                tr("Source")
                             } else {
-                                format!("Sources ({})", self.sources.len())
+                                trf("Sources (%{count})", &[("count", self.sources.len().to_string())])
                             }),
                     )
                     .child(
@@ -577,7 +801,7 @@ impl Render for OperationDialog {
                             .min_w_0()
                             .overflow_y_scrollbar()
                             .when(self.sources.is_empty(), |list| {
-                                list.child("No source selected")
+                                list.child(tr("No source selected"))
                             })
                             .children(sources),
                     )
@@ -589,7 +813,7 @@ impl Render for OperationDialog {
                                     .small()
                                     .outline()
                                     .icon(IconName::File)
-                                    .label(
+                                    .label(tr(
                                         if matches!(
                                             self.operation,
                                             Operation::Extract | Operation::Test
@@ -598,7 +822,7 @@ impl Render for OperationDialog {
                                         } else {
                                             "Choose files…"
                                         },
-                                    )
+                                    ))
                                     .disabled(self.picking)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.pick(PickTarget::SourceFile, window, cx)
@@ -612,7 +836,7 @@ impl Render for OperationDialog {
                                             .small()
                                             .outline()
                                             .icon(IconName::Folder)
-                                            .label("Choose folders…")
+                                            .label(tr("Choose folders…"))
                                             .disabled(self.picking)
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.pick(PickTarget::SourceFolder, window, cx)
@@ -622,95 +846,48 @@ impl Render for OperationDialog {
                             ),
                     ),
             )
-            .when(!matches!(self.operation, Operation::Test), |body| {
+            .when(matches!(self.operation, Operation::Add), |body| {
+                body.child(self.render_creation(cx))
+            })
+            .when(matches!(self.operation, Operation::Extract | Operation::Copy | Operation::Move), |body| {
                 body.child(
                     v_flex()
                         .gap_2()
-                        .child(div().text_sm().font_semibold().child(
-                            if matches!(self.operation, Operation::Add) {
-                                "Save in"
-                            } else {
-                                "Destination folder"
-                            },
-                        ))
-                        .when(matches!(self.operation, Operation::Add | Operation::Extract), |section| {
-                            section.child(Input::new(&self.destination_input)
-                                .id(if matches!(self.operation, Operation::Add) { "add-destination" } else { "extract-destination" }).small())
-                                .child(div().text_xs().text_color(cx.theme().muted_foreground)
-                                    .child("Enter a path or choose a folder. Relative paths start from the current folder."))
-                        })
-                        .when(!matches!(self.operation, Operation::Add | Operation::Extract), |section| section.child(
-                            div()
-                                .min_w_0()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(destination),
-                        ))
-                        .when_some(stream_name, |section, name| section.child(
-                            div().min_w_0().text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!("Extracts one file: {name}. The source file is kept.")),
-                        ))
+                        .child(div().text_sm().font_semibold().child(tr("Destination folder")))
                         .child(
-                            Button::new("choose-destination")
-                                .small()
-                                .outline()
-                                .icon(IconName::FolderOpen)
-                                .label(if matches!(self.operation, Operation::Add) {
-                                    "Choose archive…"
-                                } else {
-                                    "Choose folder…"
-                                })
-                                .disabled(self.picking)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.pick(PickTarget::Destination, window, cx)
-                                })),
+                            h_flex().gap_2()
+                                .child(
+                                    div().flex_1().min_w_0()
+                                        .when(matches!(self.operation, Operation::Extract), |field| {
+                                            field.child(Input::new(&self.destination_input).id("extract-destination").small())
+                                        })
+                                        .when(!matches!(self.operation, Operation::Extract), |field| {
+                                            field.child(div().text_sm().text_color(cx.theme().muted_foreground).child(destination))
+                                        }),
+                                )
+                                .child(
+                                    Button::new("choose-destination").small().outline().flex_none().icon(IconName::FolderOpen)
+                                        .label(tr("Choose folder…")).disabled(self.picking)
+                                        .on_click(cx.listener(|this, _, window, cx| this.pick(PickTarget::Destination, window, cx))),
+                                ),
                         )
-                        .when(
-                            matches!(self.operation, Operation::Add)
-                                || (matches!(self.operation, Operation::Copy | Operation::Move)
-                                    && self.sources.len() == 1),
-                            |section| {
-                                section
-                                    .child(div().text_sm().font_semibold().pt_2().child(
-                                        if matches!(self.operation, Operation::Add) {
-                                            "Archive name"
-                                        } else {
-                                            "Name at destination"
-                                        },
-                                    ))
-                                    .child(Input::new(&self.name).id("operation-name").small())
-                            },
-                        ),
+                        .when(matches!(self.operation, Operation::Extract), |section| {
+                            section.child(div().text_xs().text_color(cx.theme().muted_foreground)
+                                    .child(tr("Enter a path or choose a folder. Relative paths start from the current folder.")))
+                        })
+                        .when_some(stream_name, |section, name| section.child(
+                            div().min_w_0().text_sm().text_color(cx.theme().muted_foreground)
+                                .child(trf("Extracts one file: %{name}. The source file is kept.", &[("name", name)])),
+                        ))
+                        .when(matches!(self.operation, Operation::Copy | Operation::Move) && self.sources.len() == 1, |section| {
+                            section.child(div().text_sm().font_semibold().pt_2().child(tr("Name at destination")))
+                                .child(Input::new(&self.name).id("operation-name").small())
+                        }),
                 )
             })
-            .when(matches!(self.operation, Operation::Add), |body| {
-                body.child(v_flex().gap_2()
-                    .child(div().text_sm().font_semibold().child("Archive format"))
-                    .child(Select::new(&self.format).id("archive-format").accessibility_label("Archive format").small())
-                    .when(matches!(self.archive_format(cx), ArchiveFormat::Zip | ArchiveFormat::SevenZip), |section| {
-                        section.child(div().text_sm().font_semibold().pt_2().child("Volume size (optional)"))
-                            .child(Input::new(&self.volume_size).id("archive-volume-size").small())
-                            .child(div().text_xs().text_color(cx.theme().muted_foreground)
-                                .child(if self.archive_format(cx) == ArchiveFormat::Zip {
-                                    "B, K, M, G units; leave empty for one archive. Use a .zip name; open the resulting .zip.001 file."
-                                } else {
-                                    "B, K, M, G units; leave empty for one archive. Open the resulting .7z.001 file."
-                                }))
-                    }))
+            .when(matches!(self.operation, Operation::Extract), |body| {
+                body.child(self.archive_settings.render(false, self.archive_format(cx), cx))
             })
-            .when(
-                matches!(
-                    self.operation,
-                    Operation::Add | Operation::Extract | Operation::Test
-                ),
-                |body| {
-                    body.child(
-                        self.archive_settings
-                            .render(matches!(self.operation, Operation::Add), self.archive_format(cx), cx),
-                    )
-                },
-            )
             .when_some(self.error.clone(), |body, error| {
                 body.child(div().text_sm().text_color(cx.theme().danger).child(error))
             })

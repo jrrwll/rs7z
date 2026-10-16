@@ -1,6 +1,6 @@
 use rs7z::{
     model::{
-        archive::{ArchiveDestination, ArchiveFormat, ArchiveOperation, ArchiveOptions},
+        archive::{ArchiveDestination, ArchiveFormat, ArchiveOperation, ArchiveOptions, TarFormat},
         file::FileKind,
         operations::OperationError,
     },
@@ -29,8 +29,9 @@ fn has(path: &Path, name: &str) -> bool {
 }
 
 #[test]
-fn compressed_tar_extensions_aliases_and_default_names() {
+fn tar_extensions_aliases_and_default_names() {
     for (format, aliases) in [
+        (ArchiveFormat::Tar, vec!["tar"]),
         (ArchiveFormat::TarGzip, vec!["tar.gz", "tgz"]),
         (ArchiveFormat::TarBzip2, vec!["tar.bz2", "tbz", "tbz2"]),
         (ArchiveFormat::TarXz, vec!["tar.xz", "txz"]),
@@ -59,7 +60,6 @@ fn compressed_tar_extensions_aliases_and_default_names() {
         }
     }
     for name in [
-        "archive.tar",
         "archive.tar.gz.txt",
         "archive.tar.lzma86",
         "archive.tar.b64",
@@ -73,12 +73,71 @@ fn compressed_tar_extensions_aliases_and_default_names() {
 }
 
 #[test]
+fn tar_creation_defaults_to_gnu_and_can_use_posix_headers() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("item.txt");
+    fs::write(&source, b"tar format contents").unwrap();
+    for (name, format, magic) in [
+        ("gnu.tar", TarFormat::Gnu, b"ustar ".as_slice()),
+        ("posix.tar", TarFormat::Posix, b"ustar\0".as_slice()),
+    ] {
+        let path = root.path().join(name);
+        let mut options = ArchiveOptions::default();
+        options.tar_format = format;
+        operations::add_many_with_options(
+            std::slice::from_ref(&source),
+            &path,
+            &options,
+            &ProgressHandle::default(),
+        )
+        .unwrap();
+        assert_eq!(&fs::read(&path).unwrap()[257..263], magic);
+        assert!(has(&path, "item.txt"));
+        operations::test_archive(&path).unwrap();
+        let output = root.path().join(format!("out-{name}"));
+        operations::extract(&path, &output).unwrap();
+        assert_eq!(
+            fs::read(output.join("item.txt")).unwrap(),
+            b"tar format contents"
+        );
+    }
+}
+
+#[test]
+fn posix_header_format_is_preserved_inside_compressed_tar() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("item.txt");
+    fs::write(&source, b"compressed POSIX tar").unwrap();
+    let path = root.path().join("archive.tar.gz");
+    let mut options = ArchiveOptions::default();
+    options.tar_format = TarFormat::Posix;
+    operations::add_many_with_options(
+        std::slice::from_ref(&source),
+        &path,
+        &options,
+        &ProgressHandle::default(),
+    )
+    .unwrap();
+    let output = rs7z::service::seven_zip_cli::command()
+        .unwrap()
+        .args(["x", "-tgzip", "-so", "--"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(&output.stdout[257..263], b"ustar\0");
+    assert!(has(&path, "item.txt"));
+    operations::test_archive(&path).unwrap();
+}
+
+#[test]
 fn tar_aliases_browse_and_extract_contents_instead_of_an_intermediate_tar() {
     let root = tempfile::tempdir().unwrap();
     let docs = root.path().join("docs");
     fs::create_dir_all(docs.join("nested/empty")).unwrap();
     fs::write(docs.join("nested/文件 [1].txt"), b"tar contents").unwrap();
     for extensions in [
+        vec!["tar"],
         vec!["tar.gz", "tgz"],
         vec!["tar.bz2", "tbz", "tbz2"],
         vec!["tar.xz", "txz"],
@@ -115,7 +174,7 @@ fn tar_aliases_browse_and_extract_contents_instead_of_an_intermediate_tar() {
 
 #[test]
 fn tar_supports_add_multi_copy_move_rename_delete_and_export() {
-    for extension in ["tar.gz", "tar.bz2", "tar.xz", "tar.lzma", "tar.zst"] {
+    for extension in ["tar", "tar.gz", "tar.bz2", "tar.xz", "tar.lzma", "tar.zst"] {
         let root = tempfile::tempdir().unwrap();
         let docs = root.path().join("docs");
         fs::create_dir_all(docs.join("empty")).unwrap();
@@ -493,8 +552,10 @@ fn system_tar_codecs_accept_levels_and_reject_truncated_streams_before_extractio
         for (ix, level) in [
             CompressionLevel::Store,
             CompressionLevel::Fastest,
-            CompressionLevel::Standard,
+            CompressionLevel::Fast,
+            CompressionLevel::Normal,
             CompressionLevel::Maximum,
+            CompressionLevel::Ultra,
         ]
         .into_iter()
         .enumerate()

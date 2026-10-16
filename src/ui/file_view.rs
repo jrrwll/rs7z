@@ -7,11 +7,13 @@ use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use rs7z::i18n::tr;
 use rs7z::model::archive::ArchiveFormat;
 use rs7z::model::file::{FileItem, FileKind};
 use rs7z::service::{
     archive,
     file::{format_modified, format_size},
+    hash::HashAlgorithm,
     logging,
 };
 use std::path::PathBuf;
@@ -26,13 +28,100 @@ enum FileAction {
     Terminal,
 }
 
-// Headers and rows share column widths; long values stay inside their cells.
-fn metadata_cell(width: Rems, label: impl Into<SharedString>) -> Div {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum FileColumn {
+    Name,
+    Size,
+    Type,
+    CompressedSize,
+    Modified,
+    Created,
+    Accessed,
+    Encrypted,
+    Comment,
+    Crc,
+}
+
+pub(super) struct ColumnResize {
+    column: FileColumn,
+    start_x: Pixels,
+    start_width: f32,
+}
+
+const FILE_COLUMNS: &[FileColumn] = &[
+    FileColumn::Name,
+    FileColumn::Size,
+    FileColumn::Type,
+    FileColumn::Modified,
+    FileColumn::Created,
+    FileColumn::Accessed,
+];
+const ARCHIVE_COLUMNS: &[FileColumn] = &[
+    FileColumn::Name,
+    FileColumn::Size,
+    FileColumn::Type,
+    FileColumn::CompressedSize,
+    FileColumn::Modified,
+    FileColumn::Created,
+    FileColumn::Accessed,
+    FileColumn::Encrypted,
+    FileColumn::Comment,
+    FileColumn::Crc,
+];
+
+impl FileColumn {
+    fn label(self) -> String {
+        tr(match self {
+            Self::Name => "Name",
+            Self::Size => "Size",
+            Self::Type => "Type",
+            Self::CompressedSize => "Packed size",
+            Self::Modified => "Modified",
+            Self::Created => "Created",
+            Self::Accessed => "Accessed",
+            Self::Encrypted => "Encrypted",
+            Self::Comment => "Comment",
+            Self::Crc => "CRC32",
+        })
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Size => "size",
+            Self::Type => "type",
+            Self::CompressedSize => "compressed-size",
+            Self::Modified => "modified",
+            Self::Created => "created",
+            Self::Accessed => "accessed",
+            Self::Encrypted => "encrypted",
+            Self::Comment => "comment",
+            Self::Crc => "crc",
+        }
+    }
+
+    fn default_width(self) -> f32 {
+        match self {
+            Self::Name => 300.,
+            Self::Size | Self::CompressedSize => 110.,
+            Self::Type | Self::Encrypted => 100.,
+            Self::Modified | Self::Created | Self::Accessed => 144.,
+            Self::Comment => 200.,
+            Self::Crc => 110.,
+        }
+    }
+
+    fn is_number(self) -> bool {
+        matches!(self, Self::Size | Self::CompressedSize)
+    }
+}
+
+fn metadata_cell(width: Pixels, label: impl Into<SharedString>, right_aligned: bool) -> Div {
     div()
         .w(width)
         .min_w_0()
         .flex_shrink_0()
-        .text_left()
+        .when(right_aligned, |cell| cell.text_right())
         .truncate()
         .child(label.into())
 }
@@ -41,7 +130,7 @@ fn menu_item(
     menu: PopupMenu,
     browser: Entity<Browser>,
     action: FileAction,
-    label: &'static str,
+    label: String,
     icon: IconName,
     enabled: bool,
 ) -> PopupMenu {
@@ -85,6 +174,7 @@ fn menu_item(
 fn file_context_menu(
     menu: PopupMenu,
     browser: Entity<Browser>,
+    window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     let state = browser.read(cx);
@@ -103,7 +193,7 @@ fn file_context_menu(
         menu,
         browser.clone(),
         FileAction::Operation(Operation::Add),
-        "Add to archive…",
+        tr("Add to archive…"),
         IconName::Plus,
         can_add,
     );
@@ -114,7 +204,7 @@ fn file_context_menu(
             menu,
             browser.clone(),
             FileAction::Operation(Operation::Extract),
-            "Extract archive…",
+            tr("Extract archive…"),
             IconName::ArchiveRestore,
             can_extract_or_test,
         )
@@ -126,7 +216,7 @@ fn file_context_menu(
             menu,
             browser.clone(),
             FileAction::Operation(Operation::Test),
-            "Test archive…",
+            tr("Test archive…"),
             IconName::CheckCheck,
             testable,
         )
@@ -135,7 +225,7 @@ fn file_context_menu(
         menu,
         browser.clone(),
         FileAction::Operation(Operation::Copy),
-        "Copy…",
+        tr("Copy…"),
         IconName::Copy,
         has_item,
     );
@@ -143,7 +233,7 @@ fn file_context_menu(
         menu,
         browser.clone(),
         FileAction::Operation(Operation::Move),
-        "Move…",
+        tr("Move…"),
         IconName::MoveRight,
         has_item && mutable,
     );
@@ -151,7 +241,7 @@ fn file_context_menu(
         menu,
         browser.clone(),
         FileAction::Delete,
-        "Delete",
+        tr("Delete"),
         IconName::Trash,
         has_item && mutable,
     );
@@ -159,7 +249,7 @@ fn file_context_menu(
         menu,
         browser.clone(),
         FileAction::Rename,
-        "Rename…",
+        tr("Rename…"),
         IconName::Pencil,
         can_operate && has_single && mutable,
     );
@@ -167,7 +257,7 @@ fn file_context_menu(
         menu,
         browser.clone(),
         FileAction::Info,
-        "Info…",
+        tr("Info…"),
         IconName::Info,
         state.can_show_info(),
     );
@@ -175,10 +265,40 @@ fn file_context_menu(
         menu,
         browser.clone(),
         FileAction::Refresh,
-        "Refresh",
+        tr("Refresh"),
         IconName::RefreshCw,
         can_operate,
     );
+    let can_hash = has_item
+        && (in_archive
+            || state.selected_paths().iter().all(|path| {
+                state
+                    .files
+                    .iter()
+                    .any(|item| &item.path == path && item.kind != FileKind::Directory)
+            }));
+    let hash_browser = browser.clone();
+    let menu = if can_hash {
+        menu.submenu("CRC", window, cx, move |submenu, _, _| {
+            HashAlgorithm::MENU
+                .iter()
+                .fold(submenu, |submenu, &(algorithm, label)| {
+                    let browser = hash_browser.clone();
+                    submenu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                        let browser = browser.clone();
+                        window.defer(cx, move |window, cx| {
+                            browser.update(cx, |browser, cx| {
+                                browser.start_hash(algorithm, window, cx)
+                            });
+                        });
+                    }))
+                })
+        })
+    } else if !has_item {
+        menu.item(PopupMenuItem::new("CRC").disabled(true))
+    } else {
+        menu
+    };
     if in_archive {
         return menu;
     }
@@ -186,13 +306,138 @@ fn file_context_menu(
         menu.separator(),
         browser,
         FileAction::Terminal,
-        "Open in terminal",
+        tr("Open in terminal"),
         IconName::Terminal,
         can_open_terminal,
     )
 }
 
 impl Browser {
+    fn visible_columns(&self) -> &'static [FileColumn] {
+        if self.archive.is_some() {
+            ARCHIVE_COLUMNS
+        } else {
+            FILE_COLUMNS
+        }
+    }
+
+    fn column_width(&self, column: FileColumn) -> Pixels {
+        px(*self
+            .column_widths
+            .get(&column)
+            .unwrap_or(&column.default_width()))
+    }
+
+    fn file_table_width(&self) -> Pixels {
+        self.visible_columns()
+            .iter()
+            .map(|column| self.column_width(*column))
+            .sum::<Pixels>()
+            + px(24.)
+            + px(8.) * self.visible_columns().len().saturating_sub(1)
+    }
+
+    fn column_value(&self, item: &FileItem, column: FileColumn, kind: &str) -> String {
+        let archive = item.archive.as_ref();
+        match column {
+            FileColumn::Name => item.name.clone(),
+            FileColumn::Size => {
+                if item.kind == FileKind::Directory {
+                    "--".into()
+                } else {
+                    format_size(item.size)
+                }
+            }
+            FileColumn::Type => kind.into(),
+            FileColumn::CompressedSize => archive
+                .and_then(|metadata| metadata.compressed_size)
+                .map(format_size)
+                .unwrap_or_else(|| "--".into()),
+            FileColumn::Modified => format_modified(item.modified),
+            FileColumn::Created => format_modified(item.created),
+            FileColumn::Accessed => format_modified(item.accessed),
+            FileColumn::Encrypted => archive
+                .and_then(|metadata| metadata.encrypted)
+                .map(|encrypted| tr(if encrypted { "Yes" } else { "No" }))
+                .unwrap_or_else(|| "--".into()),
+            FileColumn::Comment => archive
+                .and_then(|metadata| metadata.comment.clone())
+                .filter(|comment| !comment.is_empty())
+                .unwrap_or_else(|| "--".into()),
+            FileColumn::Crc => archive
+                .and_then(|metadata| metadata.crc32)
+                .map(|crc| format!("{crc:08X}"))
+                .unwrap_or_else(|| "--".into()),
+        }
+    }
+
+    fn render_file_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .w(self.file_table_width())
+            .h(px(32.))
+            .px_3()
+            .gap_2()
+            .border_b(px(1.))
+            .border_color(cx.theme().border)
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .children(self.visible_columns().iter().map(|&column| {
+                div()
+                    .id(format!("column-{}", column.key()))
+                    .test_support()
+                    .relative()
+                    .w(self.column_width(column))
+                    .h_full()
+                    .flex_shrink_0()
+                    .child(
+                        metadata_cell(
+                            self.column_width(column),
+                            column.label(),
+                            column.is_number(),
+                        )
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .when(column.is_number(), |cell| cell.justify_end()),
+                    )
+                    .child(
+                        div()
+                            .id(format!("resize-{}", column.key()))
+                            .test_support()
+                            .absolute()
+                            .right_0()
+                            .top_0()
+                            .bottom_0()
+                            .w(px(8.))
+                            .cursor_col_resize()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.resizing_column = Some(ColumnResize {
+                                        column,
+                                        start_x: event.position.x,
+                                        start_width: this.column_width(column).as_f32(),
+                                    });
+                                }),
+                            ),
+                    )
+            }))
+    }
+
+    fn update_column_resize(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.resizing_column = None;
+            return;
+        }
+        if let Some(resize) = &self.resizing_column {
+            let width = (resize.start_width + (event.position.x - resize.start_x).as_f32())
+                .clamp(60., 800.);
+            self.column_widths.insert(resize.column, width);
+            cx.notify();
+        }
+    }
+
     pub(super) fn sidebar_button(
         &self,
         name: String,
@@ -234,15 +479,26 @@ impl Browser {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .pb_2()
-                    .child("FAVORITES"),
-            )
-            .child(self.sidebar_button("Working directory".into(), self.starting_dir.clone(), cx));
+                    .child(tr("FAVORITES")),
+            );
         if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-            panel = panel.child(self.sidebar_button("Home".into(), home.clone(), cx));
-            for name in ["Desktop", "Documents", "Downloads"] {
+            panel = panel.child(self.sidebar_button(tr("Home"), home.clone(), cx));
+            let movies = if cfg!(target_os = "macos") {
+                "Movies"
+            } else {
+                "Videos"
+            };
+            for name in [
+                "Desktop",
+                "Documents",
+                "Downloads",
+                movies,
+                "Music",
+                "Pictures",
+            ] {
                 let path = home.join(name);
                 if path.is_dir() {
-                    panel = panel.child(self.sidebar_button(name.into(), path, cx));
+                    panel = panel.child(self.sidebar_button(tr(name), path, cx));
                 }
             }
         }
@@ -254,9 +510,9 @@ impl Browser {
                         .pb_2()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("LOCATIONS"),
+                        .child(tr("LOCATIONS")),
                 )
-                .child(self.sidebar_button("Computer".into(), root.to_path_buf(), cx));
+                .child(self.sidebar_button(tr("Computer"), root.to_path_buf(), cx));
         }
         panel
     }
@@ -287,12 +543,7 @@ impl Browser {
             },
             FileKind::Other => "File",
         };
-        let size = if item.kind == FileKind::Directory {
-            "--".to_owned()
-        } else {
-            format_size(item.size)
-        };
-        let modified = format_modified(item.modified);
+        let kind = tr(kind);
         let icon = match item.kind {
             FileKind::Directory => IconName::Folder,
             FileKind::Archive => IconName::FileArchive,
@@ -301,7 +552,7 @@ impl Browser {
         h_flex()
             .id(format!("file-{}", path.display()))
             .test_support()
-            .w_full()
+            .w(self.file_table_width())
             .min_w_0()
             .overflow_hidden()
             .h(px(32.))
@@ -344,11 +595,31 @@ impl Browser {
                 }
                 cx.notify();
             }))
-            .child(Icon::new(icon).small().flex_shrink_0())
-            .child(div().flex_1().min_w_0().truncate().child(item.name.clone()))
-            .child(metadata_cell(rems(6.), size).text_sm())
-            .child(metadata_cell(rems(6.), kind).text_sm())
-            .child(metadata_cell(rems(10.), modified).text_sm())
+            .children(self.visible_columns().iter().map(|&column| {
+                let width = self.column_width(column);
+                let value = self.column_value(item, column, &kind);
+                if column == FileColumn::Name {
+                    h_flex()
+                        .w(width)
+                        .min_w_0()
+                        .flex_shrink_0()
+                        .gap_2()
+                        .child(Icon::new(icon).small().flex_shrink_0())
+                        .child(div().min_w_0().truncate().child(value))
+                        .into_any_element()
+                } else {
+                    metadata_cell(width, value.clone(), column.is_number())
+                        .id(format!(
+                            "file-cell-{}-{}",
+                            item.path.display(),
+                            column.key()
+                        ))
+                        .test_support()
+                        .aria_label(value)
+                        .text_sm()
+                        .into_any_element()
+                }
+            }))
     }
 
     pub(super) fn render_files(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -359,120 +630,168 @@ impl Browser {
             .h_full()
             .min_w_0()
             .min_h_0()
+            .relative()
             .bg(cx.theme().background)
-            .child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .h(px(32.))
-                    .px_3()
-                    .gap_2()
-                    .justify_start()
-                    .text_left()
-                    .border_b(px(1.))
-                    .border_color(cx.theme().border)
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(div().w_4().flex_shrink_0())
-                    .child(div().flex_1().min_w_0().truncate().child("Name"))
-                    .child(metadata_cell(rems(6.), "Size"))
-                    .child(metadata_cell(rems(6.), "Type"))
-                    .child(metadata_cell(rems(10.), "Modified")),
+            .on_mouse_move(cx.listener(|this, event, _, cx| {
+                this.update_column_resize(event, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| {
+                    this.resizing_column = None;
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| {
+                    this.resizing_column = None;
+                }),
             )
             .child(
                 div()
-                    .id("file-list-area")
-                    .flex_1()
-                    .min_h_0()
+                    .id("file-horizontal-scroll")
+                    .test_support()
+                    .size_full()
                     .min_w_0()
-                    .relative()
-                    .track_focus(&self.focus)
-                    .key_context(super::FILE_LIST_CONTEXT)
-                    .on_action(cx.listener(|this, _: &super::AddToArchive, window, cx| {
-                        this.begin_operation(Operation::Add, window, cx);
-                    }))
-                    .on_action(cx.listener(|this, _: &super::ExtractArchive, window, cx| {
-                        this.begin_operation(Operation::Extract, window, cx);
-                    }))
-                    .on_action(cx.listener(|this, _: &super::TestArchive, window, cx| {
-                        this.begin_operation(Operation::Test, window, cx);
-                    }))
-                    .on_action(cx.listener(|this, _: &super::CopyItems, window, cx| {
-                        this.begin_operation(Operation::Copy, window, cx);
-                    }))
-                    .on_action(cx.listener(|this, _: &super::MoveItems, window, cx| {
-                        this.begin_operation(Operation::Move, window, cx);
-                    }))
-                    .on_action(cx.listener(|this, _: &super::DeleteItems, window, cx| {
-                        this.delete_selected(window, cx);
-                    }))
-                    .on_action(cx.listener(|this, _: &super::RenameItem, window, cx| {
-                        this.begin_rename(window, cx);
-                    }))
-                    .on_action(cx.listener(|this, _: &super::ShowInfo, window, cx| {
-                        this.show_info(window, cx);
-                    }))
-                    .on_action(cx.listener(|this, _: &super::SelectAllItems, _, cx| {
-                        if !this.busy {
-                            let visible = this
-                                .filtered()
-                                .iter()
-                                .map(|item| item.path.clone())
-                                .collect::<Vec<_>>();
-                            this.selection.select_all(&visible);
-                            cx.notify();
-                        }
-                    }))
-                    .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
-                        if event.standard_click() {
-                            this.selection.clear();
-                            logging::detail("Selection cleared");
-                            window.focus(&this.focus, cx);
-                            cx.notify();
-                        }
-                    }))
-                    .when(count > 0, |panel| {
-                        panel
-                            .child(
-                                uniform_list(
-                                    "file-list",
-                                    count,
-                                    cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                                        let filtered = this.filtered();
-                                        range
-                                            .filter_map(|ix| filtered.get(ix))
-                                            .map(|item| {
-                                                this.render_file_row(item, cx).into_any_element()
-                                            })
-                                            .collect::<Vec<_>>()
-                                    }),
-                                )
-                                .size_full()
-                                .track_scroll(&self.list_scroll),
-                            )
+                    .overflow_x_scroll()
+                    .track_scroll(&self.horizontal_scroll)
+                    .child(
+                        v_flex()
+                            .w(self.file_table_width())
+                            .h_full()
+                            .child(self.render_file_header(cx))
                             .child(
                                 div()
-                                    .absolute()
-                                    .top_0()
-                                    .right_0()
-                                    .bottom_0()
-                                    .child(Scrollbar::vertical(&self.list_scroll)),
-                            )
-                    })
-                    .when(count == 0, |panel| {
-                        panel.child(div().p_4().text_color(cx.theme().muted_foreground).child(
-                            if self.search.is_empty() {
-                                "No items"
-                            } else {
-                                "No results"
-                            },
-                        ))
-                    })
-                    .context_menu({
-                        let browser = cx.entity();
-                        move |menu, _, cx| file_context_menu(menu, browser.clone(), cx)
+                                    .id("file-list-area")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .min_w_0()
+                                    .relative()
+                                    .track_focus(&self.focus)
+                                    .key_context(super::FILE_LIST_CONTEXT)
+                                    .on_action(cx.listener(
+                                        |this, _: &super::AddToArchive, window, cx| {
+                                            this.begin_operation(Operation::Add, window, cx);
+                                        },
+                                    ))
+                                    .on_action(cx.listener(
+                                        |this, _: &super::ExtractArchive, window, cx| {
+                                            this.begin_operation(Operation::Extract, window, cx);
+                                        },
+                                    ))
+                                    .on_action(cx.listener(
+                                        |this, _: &super::TestArchive, window, cx| {
+                                            this.begin_operation(Operation::Test, window, cx);
+                                        },
+                                    ))
+                                    .on_action(cx.listener(
+                                        |this, _: &super::CopyItems, window, cx| {
+                                            this.begin_operation(Operation::Copy, window, cx);
+                                        },
+                                    ))
+                                    .on_action(cx.listener(
+                                        |this, _: &super::MoveItems, window, cx| {
+                                            this.begin_operation(Operation::Move, window, cx);
+                                        },
+                                    ))
+                                    .on_action(cx.listener(
+                                        |this, _: &super::DeleteItems, window, cx| {
+                                            this.delete_selected(window, cx);
+                                        },
+                                    ))
+                                    .on_action(cx.listener(
+                                        |this, _: &super::RenameItem, window, cx| {
+                                            this.begin_rename(window, cx);
+                                        },
+                                    ))
+                                    .on_action(cx.listener(
+                                        |this, _: &super::ShowInfo, window, cx| {
+                                            this.show_info(window, cx);
+                                        },
+                                    ))
+                                    .on_action(cx.listener(
+                                        |this, _: &super::SelectAllItems, _, cx| {
+                                            if !this.busy {
+                                                let visible = this
+                                                    .filtered()
+                                                    .iter()
+                                                    .map(|item| item.path.clone())
+                                                    .collect::<Vec<_>>();
+                                                this.selection.select_all(&visible);
+                                                cx.notify();
+                                            }
+                                        },
+                                    ))
+                                    .on_click(cx.listener(
+                                        |this, event: &ClickEvent, window, cx| {
+                                            if event.standard_click() {
+                                                this.selection.clear();
+                                                logging::detail("Selection cleared");
+                                                window.focus(&this.focus, cx);
+                                                cx.notify();
+                                            }
+                                        },
+                                    ))
+                                    .when(count > 0, |panel| {
+                                        panel.child(
+                                            uniform_list(
+                                                "file-list",
+                                                count,
+                                                cx.processor(
+                                                    |this, range: std::ops::Range<usize>, _, cx| {
+                                                        let filtered = this.filtered();
+                                                        range
+                                                            .filter_map(|ix| filtered.get(ix))
+                                                            .map(|item| {
+                                                                this.render_file_row(item, cx)
+                                                                    .into_any_element()
+                                                            })
+                                                            .collect::<Vec<_>>()
+                                                    },
+                                                ),
+                                            )
+                                            .size_full()
+                                            .track_scroll(&self.list_scroll),
+                                        )
+                                    })
+                                    .when(count == 0, |panel| {
+                                        panel.child(
+                                            div()
+                                                .p_4()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(if self.search.is_empty() {
+                                                    tr("No items")
+                                                } else {
+                                                    tr("No results")
+                                                }),
+                                        )
+                                    })
+                                    .context_menu({
+                                        let browser = cx.entity();
+                                        move |menu, window, cx| {
+                                            file_context_menu(menu, browser.clone(), window, cx)
+                                        }
+                                    }),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(32.))
+                    .right_0()
+                    .bottom_0()
+                    .when(count > 0, |bar| {
+                        bar.child(Scrollbar::vertical(&self.list_scroll))
                     }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .child(Scrollbar::horizontal(&self.horizontal_scroll)),
             )
     }
 }
