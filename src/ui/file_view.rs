@@ -450,6 +450,11 @@ impl Browser {
             .ghost()
             .w_full()
             .selected(selected)
+            .when(selected, |button| {
+                button
+                    .bg(cx.theme().sidebar_accent)
+                    .text_color(cx.theme().sidebar_accent_foreground)
+            })
             .accessibility_label(name.clone())
             .child(
                 h_flex()

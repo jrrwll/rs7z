@@ -79,10 +79,69 @@ fn edit_text(id: &str, value: &str, window: &mut Window, cx: &mut App) {
 }
 
 #[gpui_kit::test]
+fn apple_theme_preserves_file_selection_and_settings_at_minimum_width(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        init_test_app(cx);
+        rs7z::theme::ThemeFile::parse(include_str!("../../themes/apple.toml"))
+            .unwrap()
+            .apply(cx);
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let directory = directory.path().canonicalize().unwrap();
+    std::fs::write(directory.join("Apple notes.txt"), "notes").unwrap();
+    std::fs::write(directory.join("Another file.txt"), "other").unwrap();
+    let mut browser = None;
+    let handle = cx.open_window(size(px(820.), px(660.)), |window, cx| {
+        let view = cx.new(|cx| Browser::new_at(&directory, window, cx));
+        browser = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let browser = browser.unwrap();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let active = gpui_kit::component::Theme::global(cx);
+        assert_eq!(active.theme_name().as_ref(), "Apple");
+        assert_eq!(active.background, gpui_kit::rgb(0xffffff).into());
+        assert_eq!(active.sidebar, gpui_kit::rgb(0xf5f5f7).into());
+        assert_eq!(active.primary, gpui_kit::rgb(0x0066cc).into());
+        assert!(window.find("settings").bounds().right() <= px(820.));
+        let path = directory.join("Apple notes.txt");
+        window.click(format!("file-{}", path.display()), cx);
+        assert!(browser.read(cx).selection.contains(&path));
+        browser.update(cx, |browser, cx| {
+            browser.search = "Apple".into();
+            cx.notify();
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(browser.read(cx).filtered().len(), 1);
+        window.click("settings", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("dialog").visible());
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("dialog").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn settings_open_from_toolbar_with_language_controls(cx: &mut TestAppContext) {
     use gpui_kit::OwnedMenuItem;
 
     cx.update(init_test_app);
+    cx.update(|cx| cx.set_reduce_motion(true));
     let handle = cx.open_window(size(px(820.), px(660.)), |window, cx| {
         let browser = cx.new(|cx| Browser::new(window, cx));
         Root::new(browser, window, cx)
@@ -111,26 +170,52 @@ fn settings_open_from_toolbar_with_language_controls(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
-        assert!(window.try_find("apply-language").is_some());
+        assert!(window.try_find("apply-settings").is_some());
         assert!(window.try_find("settings-language-choice").is_some());
+        assert!(window.try_find("theme-choice").is_some());
         window.press("escape", cx);
     })
     .unwrap();
     cx.run_until_parked();
+    let expected_language = cx
+        .update_window(handle.into(), |_, window, cx| {
+            window.click("settings", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("settings-language-choice").is_some());
+            assert!(window.find("external-language-file").visible());
+            assert!(window.find("browse-language").visible());
+            assert!(window.find("theme-choice").visible());
+            assert!(window.find("external-theme-file").visible());
+            assert!(window.find("browse-theme").visible());
+            let builtin = window.within("built-in-language").find("input").bounds();
+            let external = window.find("external-language-file").bounds();
+            let browse = window.find("browse-language").bounds();
+            assert_eq!(builtin.left(), external.left());
+            assert_eq!(builtin.right(), browse.right());
+            assert!(builtin.bottom() < external.top());
+            let theme = window.within("theme-choice").find("input").bounds();
+            let theme_file = window.find("external-theme-file").bounds();
+            let browse_theme = window.find("browse-theme").bounds();
+            assert_eq!(theme.left(), theme_file.left());
+            assert_eq!(theme.right(), browse_theme.right());
+            assert!(theme.bottom() < theme_file.top());
+            assert_eq!(builtin.left(), theme.left());
+            assert_eq!(builtin.right(), theme.right());
+            // The dialog restores the user's saved language rather than always English.
+            let next = match window.find("built-in-language").value() {
+                Some("English") => "Simplified Chinese",
+                Some("Simplified Chinese") => "English",
+                value => panic!("unexpected built-in language: {value:?}"),
+            };
+            window.within("built-in-language").click("input", cx);
+            next
+        })
+        .unwrap();
+    cx.run_until_parked();
     cx.update_window(handle.into(), |_, window, cx| {
-        window.click("settings", cx);
         window.render_frame(cx);
-        assert!(window.try_find("settings-language-choice").is_some());
-        assert!(window.find("external-language-file").visible());
-        assert!(window.find("browse-language").visible());
-        let builtin = window.within("built-in-language").find("input").bounds();
-        let external = window.find("external-language-file").bounds();
-        let browse = window.find("browse-language").bounds();
-        assert_eq!(builtin.left(), external.left());
-        assert_eq!(builtin.right(), browse.right());
-        assert!(builtin.bottom() < external.top());
-        window.within("built-in-language").click("input", cx);
         window.press("down", cx);
+        window.render_frame(cx);
         window.press("enter", cx);
     })
     .unwrap();
@@ -139,7 +224,7 @@ fn settings_open_from_toolbar_with_language_controls(cx: &mut TestAppContext) {
         window.render_frame(cx);
         assert_eq!(
             window.find("built-in-language").value(),
-            Some("Simplified Chinese")
+            Some(expected_language)
         );
         edit_text(
             "external-language-file",
@@ -174,6 +259,23 @@ fn settings_open_from_toolbar_with_language_controls(cx: &mut TestAppContext) {
             Some("/tmp/custom-language.toml")
         );
         assert!(window.find("browse-language").visible());
+        edit_text("external-theme-file", "/tmp/custom-theme.toml", window, cx);
+        assert_eq!(
+            window.find("external-theme-file").value(),
+            Some("/tmp/custom-theme.toml")
+        );
+        assert!(window.find("browse-theme").visible());
+        window.within("theme-source").click(1usize, cx);
+        assert_eq!(
+            window.within("theme-source").find(1usize).selected(),
+            Some(true)
+        );
+        assert!(window.find("theme-choice").visible());
+        window.within("theme-source").click(0usize, cx);
+        assert_eq!(
+            window.find("external-theme-file").value(),
+            Some("/tmp/custom-theme.toml")
+        );
         window.press("escape", cx);
     })
     .unwrap();
@@ -196,6 +298,49 @@ fn settings_open_from_toolbar_with_language_controls(cx: &mut TestAppContext) {
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
         assert!(window.try_find("settings-language-choice").is_some());
+        window
+            .within("settings-tabs")
+            .within("tabs-inner")
+            .click(1usize, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("terminal-choice").is_some());
+        assert!(window.find("terminal-command").visible());
+        let terminal = window.within("terminal-choice").find("input").bounds();
+        let command = window.find("terminal-command").bounds();
+        assert_eq!(terminal.left(), command.left());
+        assert_eq!(terminal.right(), command.right());
+        assert!(terminal.bottom() < command.top());
+        edit_text("terminal-command", "my-terminal $1", window, cx);
+        assert_eq!(
+            window.find("terminal-command").value(),
+            Some("my-terminal $1")
+        );
+        window.within("terminal-source").click(1usize, cx);
+        assert_eq!(
+            window.within("terminal-source").find(1usize).selected(),
+            Some(true)
+        );
+        assert!(window.find("terminal-choice").visible());
+        window.within("terminal-source").click(0usize, cx);
+        assert_eq!(
+            window.find("terminal-command").value(),
+            Some("my-terminal $1")
+        );
+        assert!(window.try_find("settings-language-choice").is_none());
+        window
+            .within("settings-tabs")
+            .within("tabs-inner")
+            .click(0usize, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("theme-choice").is_some());
     })
     .unwrap();
 }

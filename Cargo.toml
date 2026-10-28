@@ -10,6 +10,7 @@ rfd = "0.17.2"
 serde = "1.0.229"
 shlex = "1.3.0"
 toml = "1.1.6"
+toml_edit = "0.25.17"
 tempfile = "3.27.0"
 rust-i18n = "4.2.4"
 
@@ -18,3 +19,8 @@ rust-i18n = "4.2.4"
 zip = { version = "9", default-features = false, features = ["deflate", "aes-crypto"] }
 crc32fast = "1"
 gpui-kit = { version = "0.7.0", features = ["test-support"] }
+
+[[test]]
+name = "sidebar_rendering"
+# The native macOS text system and Metal renderer must run on the main thread.
+harness = false

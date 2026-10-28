@@ -16,7 +16,7 @@ mod toolbar;
 #[path = "../../tests/support/file_view.rs"]
 mod tests;
 
-use gpui_kit::component::{Root, input::InputState};
+use gpui_kit::component::{Colorize as _, Root, Theme, input::InputState};
 use gpui_kit::*;
 use rs7z::i18n::{self, tr};
 use rs7z::model::archive::ArchiveIndex;
@@ -168,11 +168,71 @@ pub fn run(path: PathBuf) {
         Err(error) => logging::error(error),
     }
     logging::info("Application started");
+    match config::config_path() {
+        Ok(path) => logging::detail(format!("Configuration file: {}", path.display())),
+        Err(error) => logging::error(error),
+    }
+    let theme = config::theme_from_env().and_then(|source| {
+        source
+            .map(|source| {
+                let (description, theme) = match source {
+                    config::ThemeSource::Builtin(id) => {
+                        let theme = rs7z::theme::ThemeFile::builtin(&id)?;
+                        (format!("built-in {id}"), theme)
+                    }
+                    config::ThemeSource::File(path) => {
+                        let path = std::path::absolute(&path).map_err(|error| {
+                            format!("Cannot resolve theme {}: {error}", path.display())
+                        })?;
+                        logging::detail(format!("Loading theme file: {}", path.display()));
+                        let theme = rs7z::theme::ThemeFile::load(&path)?;
+                        (path.display().to_string(), theme)
+                    }
+                };
+                Ok((description, theme))
+            })
+            .transpose()
+    });
+    let theme = match theme {
+        Ok(Some(theme)) => Some(theme),
+        Ok(None) => {
+            logging::detail("No theme file selected; using the framework default theme");
+            None
+        }
+        Err(error) => {
+            let message = format!("Cannot load theme; using the default theme. {error}");
+            logging::error(&message);
+            logging::detail(message);
+            None
+        }
+    };
     gpui_kit::application()
         .with_assets(gpui_kit::assets::AllAssets)
         .with_quit_mode(QuitMode::LastWindowClosed)
         .run(move |cx| {
             gpui_kit::init(cx);
+            if let Some((_, theme)) = &theme {
+                theme.apply(cx);
+            }
+            let active = Theme::global(cx);
+            let source = theme
+                .as_ref()
+                .map(|(description, _)| description.clone())
+                .unwrap_or_else(|| "framework default".into());
+            logging::detail(format!(
+                "Active theme: {} (mode: {:?}, source: {})",
+                active.theme_name(),
+                active.mode,
+                source
+            ));
+            logging::detail(format!(
+                "Theme values: background={}, foreground={}, sidebar={}, primary={}, radius={:?}",
+                active.background.to_hex(),
+                active.foreground.to_hex(),
+                active.sidebar.to_hex(),
+                active.primary.to_hex(),
+                active.radius
+            ));
             init_app_actions(cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(

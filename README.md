@@ -183,25 +183,20 @@ The ten results for `*` are **CRC32, CRC64, SHA256, SHA1, BLAKE2sp, MD5, XXH64, 
 
 RS7Z extracts selected archive entries into temporary directories before hashing them and uses the archive password when needed. Hashing `archive.7z` as a filesystem file instead checks the compressed container bytes. For multiple files or directories, 7zz's `for data:` result is an aggregate, not a list of individual file digests; do not interpret it as the digest of a concatenated stream. The list's CRC32 column is stored archive metadata and may show `--`; the CRC menu calculates fresh checksums from file contents. CRC/XXH64 are useful for accidental corruption checks; MD5/SHA-1 should not be used for security-sensitive verification.
 
-## Languages
+## Builtin Themes
 
-Open **Settings** (gear icon) and use the **General** tab to select English,
-Simplified Chinese, or an external language file. Click **Apply**, then restart
-rs7z. The built-in translations live separately in `locales/en.toml` and
-`locales/zh-CN.toml`. English values are empty: each key is the English text
-used when a translation is missing or empty.
-
-External language files use the same flat TOML format. The English text is the
-key, so a partial file is enough:
-
-```toml
-"Settings" = "Paramètres"
-"Copy all" = "Tout copier"
-"%{count} items" = "%{count} éléments"
-```
-
-Missing or invalid individual entries (including empty values or mismatched
-`%{placeholder}` names) fall back to English. Invalid TOML is rejected when
-you apply it. Settings are saved in `~/Library/Application Support/rs7z/settings.toml`
-on macOS or `${XDG_CONFIG_HOME:-~/.config}/rs7z/settings.toml` on Linux. Set
-`RS7Z_SETTINGS` to override the settings file path.
+| Theme file | Appearance |
+| --- | --- |
+| `themes/apple.toml` | Native system font, light gray chrome, blue selection |
+| `themes/opencode.ai.toml` | Warm white, ink selection, monospaced UI |
+| `themes/claude.toml` | Cream surfaces, coral selection, warm text |
+| `themes/nvidia.toml` | White and black structure, NVIDIA green selection |
+| `themes/tesla.toml` | White and carbon gray, electric-blue selection |
+| `themes/x.ai.toml` | Near-black surfaces, white selection (dark mode) |
+| `themes/binance.toml` | Dark trading surfaces, yellow selection with ink text |
+| `themes/coinbase.toml` | White surfaces, Coinbase blue selection, rounded controls |
+| `themes/playstation.toml` | Light gray chrome, PlayStation blue selection |
+| `themes/pinterest.toml` | Cream chrome, red selection, soft rounded surfaces |
+| `themes/notion.toml` | Warm gray surfaces, purple selection, lavender hover |
+| `themes/starbucks.toml` | Cream and ceramic surfaces, green selection |
+| `themes/zapier.toml` | Warm cream surfaces, orange selection with coffee text |

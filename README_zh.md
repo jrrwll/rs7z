@@ -183,16 +183,20 @@ RS7Z 使用临时目录处理这些中间层。测试带压缩层的 TAR 时，�
 
 RS7Z 会先将选中的压缩包条目解压到临时目录，再计算校验和；需要时使用压缩包密码。若在普通文件目录中对 `archive.7z` 计算校验和，校验的则是压缩容器自身的字节。对于多个文件或目录，7zz 的 `for data:` 是汇总结果，不是逐文件摘要列表，也不能理解为文件拼接后的摘要。列表中的 CRC32 列来自压缩包保存的元数据，可能显示 `--`；CRC 菜单则从文件内容重新计算。CRC/XXH64 适用于检查意外损坏；MD5/SHA-1 不应用于安全敏感的验证。
 
-## 语言设置
+## 内置主题
 
-打开“设置”（齿轮图标），在“常规”选项卡中选择英语、简体中文或外部语言文件。点击“应用”后重启 rs7z 生效。内置翻译分别保存在 `locales/en.toml` 和 `locales/zh-CN.toml`。英文文件的值留空，翻译缺失或为空时使用键本身的英文文本。
-
-外部语言文件采用相同的扁平 TOML 格式，以英文文本为键，因此可以只提供部分翻译：
-
-```toml
-"Settings" = "Paramètres"
-"Copy all" = "Tout copier"
-"%{count} items" = "%{count} éléments"
-```
-
-缺失或无效的单个条目，包括空值或 `%{placeholder}` 名称不匹配的条目，仅该条目回退到英文。TOML 格式错误时无法应用。设置在 macOS 保存到 `~/Library/Application Support/rs7z/settings.toml`，在 Linux 保存到 `${XDG_CONFIG_HOME:-~/.config}/rs7z/settings.toml`。可通过 `RS7Z_SETTINGS` 覆盖设置文件路径。
+| 主题文件 | 外观 |
+| --- | --- |
+| `themes/apple.toml` | 原生系统字体、浅灰界面、蓝色选中态 |
+| `themes/opencode.ai.toml` | 暖白底、深墨色选中态、等宽字体 |
+| `themes/claude.toml` | 奶油色表面、珊瑚色选中态、暖色文字 |
+| `themes/nvidia.toml` | 黑白结构、NVIDIA 品牌绿选中态 |
+| `themes/tesla.toml` | 白底碳灰字、电蓝色选中态 |
+| `themes/x.ai.toml` | 近黑表面、白色选中态（深色模式） |
+| `themes/binance.toml` | 深色交易界面、黄色选中态配深色文字 |
+| `themes/coinbase.toml` | 白色表面、Coinbase 蓝选中态、圆角控件 |
+| `themes/playstation.toml` | 浅灰界面、PlayStation 蓝选中态 |
+| `themes/pinterest.toml` | 奶油色界面、红色选中态、柔和圆角 |
+| `themes/notion.toml` | 暖灰表面、紫色选中态、淡紫悬停态 |
+| `themes/starbucks.toml` | 奶油与陶瓷色表面、绿色选中态 |
+| `themes/zapier.toml` | 暖奶油色表面、橙色选中态配咖啡色文字 |

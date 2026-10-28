@@ -2,28 +2,217 @@ use crate::model::config::{TerminalApp, TerminalConfig};
 use std::{
     ffi::OsString,
     fs,
-    path::Path,
+    io::Write,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+use toml_edit::{DocumentMut, value};
 
-pub fn from_config(path: &Path) -> Result<TerminalConfig, String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ThemeSource {
+    Builtin(String),
+    File(PathBuf),
+}
+
+pub struct Preferences {
+    terminal: String,
+    terminal_command: String,
+    theme: String,
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            terminal: if cfg!(target_os = "macos") {
+                "Terminal"
+            } else {
+                ""
+            }
+            .into(),
+            terminal_command: String::new(),
+            theme: String::new(),
+        }
+    }
+}
+
+impl Preferences {
+    pub fn new(terminal: String, terminal_command: String, theme: String) -> Result<Self, String> {
+        let preferences = Self {
+            terminal,
+            terminal_command,
+            theme,
+        };
+        preferences.terminal_config()?;
+        Ok(preferences)
+    }
+
+    pub fn terminal(&self) -> &str {
+        &self.terminal
+    }
+    pub fn terminal_command(&self) -> &str {
+        &self.terminal_command
+    }
+    pub fn theme(&self) -> &str {
+        &self.theme
+    }
+
+    pub fn terminal_config(&self) -> Result<TerminalConfig, String> {
+        if !self.terminal_command.trim().is_empty() {
+            return parse_command(&self.terminal_command);
+        }
+        if self.terminal.is_empty() {
+            Ok(TerminalConfig::Disabled)
+        } else {
+            parse_app(&self.terminal).map(TerminalConfig::App)
+        }
+    }
+}
+
+pub fn terminal_names() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        &[
+            "Terminal",
+            "iTerm2",
+            "Warp",
+            "Alacritty",
+            "Kitty",
+            "WezTerm",
+            "Ghostty",
+        ]
+    } else if cfg!(target_os = "linux") {
+        &[
+            "gnome",
+            "kde",
+            "xfce4",
+            "kitty",
+            "alacritty",
+            "wezterm",
+            "ghostty",
+        ]
+    } else {
+        &[]
+    }
+}
+
+pub fn config_path() -> Result<PathBuf, String> {
+    let home = std::env::home_dir().ok_or("Cannot determine the home directory")?;
+    let directory = if cfg!(target_os = "macos") {
+        home.join("Library/Application Support")
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"))
+    };
+    Ok(directory.join("rs7z/config.toml"))
+}
+
+pub fn preferences_from_config(path: &Path) -> Result<Preferences, String> {
+    let document = read_config(path)?;
+    let string = |key: &str| match document.get(key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| format!("{key} must be a string")),
+    };
+    Ok(Preferences {
+        terminal: string("custom_terminal")?
+            .unwrap_or(if cfg!(target_os = "macos") {
+                "Terminal"
+            } else {
+                ""
+            })
+            .into(),
+        terminal_command: string("custom_terminal_cmd")?.unwrap_or("").into(),
+        theme: string("theme")?.unwrap_or("").into(),
+    })
+}
+
+pub fn preferences_from_env() -> Result<Preferences, String> {
+    let path = config_path()?;
+    if !path.exists() {
+        return Ok(Preferences::default());
+    }
+    preferences_from_config(&path)
+}
+
+pub fn save_preferences(path: &Path, preferences: &Preferences) -> Result<(), String> {
+    preferences.terminal_config()?;
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(format!("Cannot read {}: {error}", path.display())),
+    };
+    let mut document: DocumentMut = content
+        .parse()
+        .map_err(|error| format!("Invalid TOML in {}: {error}", path.display()))?;
+    set_string(&mut document, "custom_terminal", preferences.terminal());
+    if !preferences.terminal_command().is_empty() || document.contains_key("custom_terminal_cmd") {
+        set_string(
+            &mut document,
+            "custom_terminal_cmd",
+            preferences.terminal_command(),
+        );
+    }
+    if !preferences.theme().is_empty() || document.contains_key("theme") {
+        set_string(&mut document, "theme", preferences.theme());
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    temporary
+        .write_all(document.to_string().as_bytes())
+        .and_then(|()| temporary.flush())
+        .map_err(|error| error.to_string())?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error.to_string())?;
+    Ok(())
+}
+
+fn set_string(document: &mut DocumentMut, key: &str, new_value: &str) {
+    let decoration = document
+        .get(key)
+        .and_then(|item| item.as_value())
+        .map(|value| value.decor().clone());
+    document[key] = value(new_value);
+    if let Some(decoration) = decoration {
+        *document[key]
+            .as_value_mut()
+            .expect("string value")
+            .decor_mut() = decoration;
+    }
+}
+
+fn read_config(path: &Path) -> Result<toml::Value, String> {
     let content =
         fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-    let config: toml::Value =
-        toml::from_str(&content).map_err(|e| format!("Invalid TOML in {}: {e}", path.display()))?;
+    toml::from_str(&content).map_err(|e| format!("Invalid TOML in {}: {e}", path.display()))
+}
+
+fn parse_command(command: &str) -> Result<TerminalConfig, String> {
+    let args = shlex::split(command)
+        .filter(|args| !args.is_empty())
+        .ok_or("custom_terminal_cmd has invalid quoting")?;
+    if !args.iter().any(|arg| arg.contains("$1")) {
+        return Err("custom_terminal_cmd must contain $1".into());
+    }
+    Ok(TerminalConfig::Command(args))
+}
+
+pub fn from_config(path: &Path) -> Result<TerminalConfig, String> {
+    let config = read_config(path)?;
 
     if let Some(value) = config.get("custom_terminal_cmd") {
         let command = value
             .as_str()
             .ok_or("custom_terminal_cmd must be a string")?;
         if !command.trim().is_empty() {
-            let args = shlex::split(command)
-                .filter(|args| !args.is_empty())
-                .ok_or("custom_terminal_cmd has invalid quoting")?;
-            if !args.iter().any(|arg| arg.contains("$1")) {
-                return Err("custom_terminal_cmd must contain $1".into());
-            }
-            return Ok(TerminalConfig::Command(args));
+            return parse_command(command);
         }
     }
 
@@ -36,17 +225,16 @@ pub fn from_config(path: &Path) -> Result<TerminalConfig, String> {
 }
 
 pub fn from_env() -> Result<TerminalConfig, String> {
-    match std::env::var_os("RS7Z_CONFIG") {
-        Some(path) => from_config(Path::new(&path)),
-        None => Ok(default_for_platform()),
+    let path = config_path()?;
+    if !path.exists() {
+        Ok(default_for_platform())
+    } else {
+        from_config(&path)
     }
 }
 
 pub fn verbose_from_config(path: &Path) -> Result<bool, String> {
-    let content =
-        fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-    let config: toml::Value =
-        toml::from_str(&content).map_err(|e| format!("Invalid TOML in {}: {e}", path.display()))?;
+    let config = read_config(path)?;
     match config.get("verbose") {
         None => Ok(false),
         Some(value) => value
@@ -58,11 +246,47 @@ pub fn verbose_from_config(path: &Path) -> Result<bool, String> {
 pub fn verbose_from_env() -> Result<bool, String> {
     let environment = std::env::var("RS7Z_VERBOSE")
         .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
-    let configured = match std::env::var_os("RS7Z_CONFIG") {
-        Some(path) => verbose_from_config(Path::new(&path))?,
-        None => false,
+    // Keep diagnostics available even when the configuration cannot be read.
+    if environment {
+        return Ok(true);
+    }
+    let path = config_path()?;
+    let configured = if !path.exists() {
+        false
+    } else {
+        verbose_from_config(&path)?
     };
-    Ok(environment || configured)
+    Ok(configured)
+}
+
+/// Relative theme paths belong to the config file, independent of the browsed directory.
+pub fn theme_from_config(path: &Path) -> Result<Option<ThemeSource>, String> {
+    let config = read_config(path)?;
+    match config.get("theme") {
+        None => Ok(None),
+        Some(toml::Value::String(value)) if value.trim().is_empty() => Ok(None),
+        Some(toml::Value::String(value)) if value.starts_with("builtin:") => {
+            Ok(Some(ThemeSource::Builtin(value[8..].to_owned())))
+        }
+        Some(toml::Value::String(value)) => {
+            let theme = Path::new(value);
+            Ok(Some(ThemeSource::File(if theme.is_absolute() {
+                theme.to_owned()
+            } else {
+                path.parent().unwrap_or(Path::new(".")).join(theme)
+            })))
+        }
+        Some(_) => Err("theme must be a theme file path string".into()),
+    }
+}
+
+pub fn theme_from_env() -> Result<Option<ThemeSource>, String> {
+    let path = config_path()?;
+    if !path.exists() {
+        Ok(None)
+    } else {
+        theme_from_config(&path)
+    }
 }
 
 pub fn is_available(config: &TerminalConfig) -> bool {
