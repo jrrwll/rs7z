@@ -1586,7 +1586,7 @@ fn file_list_clear_and_context_menu(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-async fn crc_submenu_shows_md5_and_all_results(cx: &mut TestAppContext) {
+async fn crc_submenu_shows_single_and_all_results(cx: &mut TestAppContext) {
     use std::fs;
 
     cx.update(init_test_app);
@@ -1607,6 +1607,7 @@ async fn crc_submenu_shows_md5_and_all_results(cx: &mut TestAppContext) {
     let browser = browser.unwrap();
 
     for (index, names) in [
+        (0usize, vec!["CRC32"]),
         (6usize, vec!["MD5"]),
         (
             7,
@@ -1634,7 +1635,11 @@ async fn crc_submenu_shows_md5_and_all_results(cx: &mut TestAppContext) {
         cx.update_window(handle.into(), |_, window, cx| {
             assert_eq!(
                 window.within("submenu").find(index).label(),
-                Some(if index == 6 { "MD5" } else { "*" })
+                Some(match index {
+                    0 => "CRC-32",
+                    6 => "MD5",
+                    _ => "*",
+                })
             );
             window.within("submenu").click(index, cx);
         })
@@ -1644,6 +1649,12 @@ async fn crc_submenu_shows_md5_and_all_results(cx: &mut TestAppContext) {
         })
         .await;
         cx.update_window(handle.into(), |_, window, cx| {
+            let target = window.find("checksum-target");
+            assert!(
+                target.bounds().size.height >= window.rem_size(),
+                "file path is vertically clipped: {:?}",
+                target.bounds()
+            );
             let first = names[0];
             let name_cell = window.find(format!("checksum-name-{first}"));
             let value_cell = window.find(format!("checksum-value-{first}"));
@@ -1664,6 +1675,17 @@ async fn crc_submenu_shows_md5_and_all_results(cx: &mut TestAppContext) {
                 assert!(line.starts_with(&format!("{name}: ")), "{line}");
                 let name_cell = window.find(format!("checksum-name-{name}"));
                 let value_cell = window.find(format!("checksum-value-{name}"));
+                let row = window.find(format!("checksum-row-{name}")).bounds();
+                let value = line.split_once(": ").unwrap().1;
+                // Each displayed line must retain a full line box, even in the
+                // all-algorithms dialog's constrained scroll viewport.
+                let minimum_height = window.rem_size() * value.len().div_ceil(64) as f32;
+                assert!(
+                    value_cell.bounds().size.height >= minimum_height,
+                    "{name} text is vertically compressed: {:?}",
+                    value_cell.bounds()
+                );
+                assert!(row.size.height >= value_cell.bounds().size.height);
                 assert_eq!(
                     name_cell.bounds().left(),
                     window

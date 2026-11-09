@@ -218,6 +218,7 @@ fn show_hash_result(result: HashResult, window: &mut Window, cx: &mut App) {
                                 .test_support()
                                 .w_full()
                                 .min_w_0()
+                                .flex_shrink_0()
                                 .text_sm()
                                 .truncate()
                                 .aria_label(result.label.clone())
@@ -229,6 +230,9 @@ fn show_hash_result(result: HashResult, window: &mut Window, cx: &mut App) {
                                 .test_support()
                                 .w_full()
                                 .min_w_0()
+                                // A single result uses its content height, not
+                                // the scroll wrapper's default full height.
+                                .h_auto()
                                 .max_h(rems(24.))
                                 .gap_2()
                                 .overflow_y_scrollbar()
